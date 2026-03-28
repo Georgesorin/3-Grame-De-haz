@@ -2,7 +2,7 @@ import mido
 import numpy as np
 import sounddevice as sd
 
-mid = mido.MidiFile(r"C:\Users\bmdma\ledhack\3-Grame-De-haz\Matrix\Pirates of the Caribbean - He's a Pirate (2).mid")
+mid = mido.MidiFile(r"C:\Users\bmdma\ledhack\3-Grame-De-haz\Matrix\songs\Fly-Me-To-The-Moon.mid")
 tempo = 500000
 
 NOTE_TO_FREQ = {n: round(440 * 2 ** ((n - 69) / 12)) for n in range(128)}
@@ -27,7 +27,7 @@ for track in mid.tracks:
 print(notes)
 
 fs = 44100
-notes = notes[:1000]  # limit to first 100 notes for testing``
+notes = notes[0:200]  # limit to first 100 notes for testing``
 
 signal = np.array([])
 for freq, dur in notes:

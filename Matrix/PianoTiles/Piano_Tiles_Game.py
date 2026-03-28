@@ -102,7 +102,7 @@ TILE_MIN_WIDTH = 1
 TILE_MAX_WIDTH = 10
 # width >= this: score every tick while key held and tile overlaps key column; else one tap score.
 LONG_TILE_THRESHOLD = 4
-SCROLL_SPEED = 4.5
+SCROLL_SPEED = 7
 SPAWN_MIN_INTERVAL = 0.45
 SPAWN_MAX_INTERVAL = 1.15
 TAP_SCORE = 25
@@ -1089,7 +1089,7 @@ def main() -> None:
     game.state = "LOBBY"
     game.start_game(num_players)
     pygame.mixer.init()
-    pygame.mixer.music.load("./song_charts/test.mp3")
+    pygame.mixer.music.load("./Matrix/PianoTiles/song_charts/test.mp3")
     pygame.mixer.music.play()
     print(f"Started with {game.num_players} player(s).")
 
