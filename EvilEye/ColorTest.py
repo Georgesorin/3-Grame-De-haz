@@ -47,8 +47,8 @@ BUTTON_SLOTS = list(range(1, 11))  # 5 lit + 5 off per wall; colors only on lit 
 # Starting auto-refresh interval (seconds); shrinks each round by RAMP_DEC until MIN_REFRESH_SEC
 AUTO_REFRESH_SEC = {"easy": 10.0, "medium": 6, "hard": 5.0}
 MIN_REFRESH_SEC = 3
-RAMP_DEC = 0.1
-WIN_SCORE = 10
+RAMP_DEC = 0.2
+WIN_SCORE = 15
 
 # Base wall maps (2-team 1-wall variant built dynamically)
 WALL_MAP = {
