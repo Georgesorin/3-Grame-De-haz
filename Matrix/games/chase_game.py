@@ -340,28 +340,42 @@ class ChaseGame:
         return frame
 
     def _frame_level_intro(self, now: float) -> dict:
-        """Show level number for 1.8 s then transition to playing."""
-        DURATION = 1.8
+        """Flashy RGB interference hype screen, then transition to playing."""
+        DURATION = 2.4
         elapsed  = now - self._anim_start
         if elapsed >= DURATION:
             self._game_state = "playing"
             self._running    = True
             self._start_time = now
         frame = {}
-        pulse = 0.6 + 0.4 * math.sin(elapsed * 4.0)
+        t = elapsed
+
+        # Fast-moving full-spectrum interference background
         for y in range(BOARD_HEIGHT):
             for x in range(BOARD_WIDTH):
-                v = int(4 + 6 * math.sin(elapsed * 1.2 + x * 0.4 + y * 0.25) * pulse)
-                frame[(x, y)] = (0, max(0, v), max(0, v * 2))
-        lvl_str  = str(self._level)
-        lh_lvl   = _text_rot_height("LEVEL")      # 19 px
-        lh_num   = _text_rot_height(lvl_str)
-        gap      = 3
-        blk_h    = lh_lvl + gap + lh_num
-        y0       = max(1, (BOARD_HEIGHT - blk_h) // 2)
-        bright   = int(180 + 75 * pulse)
-        _draw_text_rot(frame, "LEVEL", y0,                 (0, bright, bright))
-        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap,  (bright, int(bright * 0.78), 0))
+                ph   = x * 0.9 + y * 0.45 + t * 14
+                ph2  = x * 0.35 - y * 0.7  + t * 9
+                mod  = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(ph2))
+                r = int((127 + 127 * math.sin(ph))         * mod * 0.75)
+                g = int((127 + 127 * math.sin(ph + 2.094)) * mod * 0.75)
+                b = int((127 + 127 * math.sin(ph + 4.189)) * mod * 0.75)
+                frame[(x, y)] = (max(0, min(255, r)),
+                                 max(0, min(255, g)),
+                                 max(0, min(255, b)))
+
+        # Text: rapid white flicker over the rainbow background
+        flicker = 0.65 + 0.35 * abs(math.sin(t * 20))
+        white   = int(255 * flicker)
+        gold    = int(210 * flicker)
+
+        lvl_str = str(self._level)
+        lh_lvl  = _text_rot_height("LEVEL")
+        lh_num  = _text_rot_height(lvl_str)
+        gap     = 3
+        blk_h   = lh_lvl + gap + lh_num
+        y0      = max(1, (BOARD_HEIGHT - blk_h) // 2)
+        _draw_text_rot(frame, "LEVEL", y0,                (white, white, white))
+        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, (white, gold,  0))
         return frame
 
     def _frame_game_over_anim(self, now: float) -> dict:
