@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "songName": "Piano Tiles",
+  "comment": "t = seconds from round start. Each entry spawns the same tile on every active player lane. row 0=red .. 5=orange, or use color name.",
+  "tiles": [
+    { "t": 0.0, "row": 0, "width": 3 },
+    { "t": 0.55, "row": 2, "width": 4 },
+    { "t": 1.0, "row": 5, "width": 2 },
+    { "t": 1.45, "row": 1, "width": 6 },
+    { "t": 2.0, "row": 4, "width": 3 },
+    { "t": 2.4, "row": 3, "width": 3 },
+    { "t": 2.85, "row": 0, "width": 4 },
+    { "t": 3.3, "row": 2, "width": 5 },
+    { "t": 3.9, "row": "yellow", "width": 3 },
+    { "t": 4.35, "row": 5, "width": 7 },
+    { "t": 5.0, "row": 1, "width": 2 }
+  ]
+}
