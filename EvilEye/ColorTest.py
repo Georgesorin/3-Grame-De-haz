@@ -27,6 +27,23 @@ REITERATE_MP3 = os.path.join(_DIR, "sounds", "reiterate.mp3")
 WON_MP3 = os.path.join(_DIR, "sounds", "won.mp3")
 
 
+def _ensure_pygame_mixer():
+    """
+    Initialize pygame.mixer on the main thread before any worker plays audio.
+    Returns True if the mixer is ready. On failure, logs to stderr.
+    """
+    if _pygame is None:
+        return False
+    try:
+        if not _pygame.mixer.get_init():
+            _pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+            _pygame.mixer.set_num_channels(12)
+        return True
+    except Exception as e:
+        print("Color Rush: pygame mixer init failed:", e, file=sys.stderr)
+        return False
+
+
 def _play_music_blocking(path, stop_event_callable):
     """
     Block until the given mp3 finishes or stop_event_callable() is true.
@@ -38,8 +55,10 @@ def _play_music_blocking(path, stop_event_callable):
         return
     try:
         if not _pygame.mixer.get_init():
-            _pygame.mixer.init()
-    except Exception:
+            _pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+            _pygame.mixer.set_num_channels(12)
+    except Exception as e:
+        print("Color Rush: mixer init (narration):", e, file=sys.stderr)
         return
     try:
         _pygame.mixer.music.load(path)
@@ -49,7 +68,8 @@ def _play_music_blocking(path, stop_event_callable):
                 _pygame.mixer.music.stop()
                 break
             _pygame.time.wait(80)
-    except Exception:
+    except Exception as e:
+        print("Color Rush: narration playback:", e, file=sys.stderr)
         try:
             _pygame.mixer.music.stop()
         except Exception:
@@ -129,7 +149,8 @@ def _play_palette_sound_blocking(pal_idx, stop_event_callable):
         return
     try:
         if not _pygame.mixer.get_init():
-            _pygame.mixer.init()
+            _pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+            _pygame.mixer.set_num_channels(12)
         snd = _pygame.mixer.Sound(path)
         ch = _pygame.mixer.find_channel(True)
         if ch is None:
@@ -140,8 +161,8 @@ def _play_palette_sound_blocking(pal_idx, stop_event_callable):
                 ch.stop()
                 return
             _pygame.time.wait(30)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Color Rush: palette sound:", e, file=sys.stderr)
 
 
 RED   = (255, 0, 0)
@@ -555,6 +576,13 @@ class ColorRushApp(tk.Tk):
         super().__init__()
         self.title("Color Rush – Evil Eye")
         self.configure(bg=BG_DARK)
+        self._audio_ok = _ensure_pygame_mixer()
+        if _pygame is None:
+            print(
+                "Color Rush: pygame is not installed — sound is disabled. "
+                "Fix: pip install pygame   (or run install_libraries.py)",
+                file=sys.stderr,
+            )
         self.minsize(520, 420)
         self.bind("<F11>", lambda e: self.attributes(
             "-fullscreen", not self.attributes("-fullscreen")))
@@ -784,7 +812,13 @@ class ColorRushApp(tk.Tk):
     def _build_setup(self):
         f = self._frame_setup
 
-        self._status_lbl = tk.Label(f, text="Ready", bg=BG_DARK, fg=FG_DIM, font=FONT_XS)
+        if _pygame is None:
+            _st = "Ready · no pygame — pip install pygame (sound off)"
+        elif not self._audio_ok:
+            _st = "Ready · audio init failed — check output device / drivers"
+        else:
+            _st = "Ready"
+        self._status_lbl = tk.Label(f, text=_st, bg=BG_DARK, fg=FG_DIM, font=FONT_XS)
         self._status_lbl.pack(side=tk.BOTTOM, pady=(0, 8))
 
         self._setup_start_btn = _make_lbl_btn(
