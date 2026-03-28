@@ -83,8 +83,8 @@ EYE_LED   = 0
 BUTTON_SLOTS = list(range(1, 11))  # 5 lit + 5 off per wall; colors only on lit LEDs
 
 # Starting auto-refresh interval (seconds); shrinks each round by RAMP_DEC until MIN_REFRESH_SEC
-AUTO_REFRESH_SEC = {"easy": 10.0, "medium": 6, "hard": 5.0}
-MIN_REFRESH_SEC = 3
+AUTO_REFRESH_SEC = {"easy": 6.0, "medium": 5, "hard": 4.0}
+MIN_REFRESH_SEC = 1
 RAMP_DEC = 0.2
 WIN_SCORE = 20
 
