@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "comment": "auto-generated Piano Tiles pattern",
+  "tiles": [
+    {
+      "t": 0.0,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 0.44,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 0.89,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 1.33,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 2.0,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 2.44,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 2.89,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 3.33,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 4.0,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 4.44,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 4.89,
+      "row": 1,
+      "width": 1
+    },
+    {
+      "t": 5.56,
+      "row": 0,
+      "width": 1
+    },
+    {
+      "t": 6.0,
+      "row": 0,
+      "width": 1
+    },
+    {
+      "t": 6.44,
+      "row": 0,
+      "width": 1
+    },
+    {
+      "t": 6.89,
+      "row": 0,
+      "width": 1
+    }
+  ]
+}
