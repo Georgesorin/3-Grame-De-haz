@@ -1,0 +1,10 @@
+{
+  "device_ip": "192.168.1.7",
+  "udp_port": 4626,
+  "receiver_port": 7800,
+  "polling_rate_ms": 100,
+  "auto_connect": true,
+  "auto_start_receiver": true,
+  "log_events": true,
+  "virtual_iface_ip": "192.168.1.7"
+}

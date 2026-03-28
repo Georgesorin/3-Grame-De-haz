@@ -1,0 +1,3 @@
+psutil
+pygame
+# tk (standard library on Windows, but typically needs a separate package on Mac/Linux)
