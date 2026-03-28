@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "songName": "Piano Tiles",
+  "songName": "Songnamewowow",
   "comment": "t = seconds from round start. Each entry spawns the same tile on every active player lane. row 0=red .. 5=orange, or use color name.",
   "tiles": [
     { "t": 0.0, "row": 0, "width": 3 },

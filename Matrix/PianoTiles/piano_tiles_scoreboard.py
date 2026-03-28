@@ -1,13 +1,3 @@
-"""
-Live scoreboard for Piano Tiles over UDP.
-
-Run while Piano_Tiles_Game.py is running. The game sends JSON snapshots to
-  scoreboard_host : scoreboard_udp_port  (default 127.0.0.1:7810, from piano_tiles_config.json)
-
-Usage:
-  python piano_tiles_scoreboard.py
-"""
-
 from __future__ import annotations
 
 import json
@@ -26,6 +16,7 @@ import Piano_Tiles_Game as ptg  # noqa: E402
 
 POLL_MS = 80
 MAX_PLAYER_ROWS = 4
+WINDOW_TITLE = "Scoreboard"
 
 
 def _song_fallback() -> str:
@@ -48,7 +39,7 @@ class ScoreboardApp:
             self._bind_error = str(e)
 
         self.root = tk.Tk()
-        self.root.title("Piano Tiles — Scoreboard (UDP)")
+        self.root.title(WINDOW_TITLE)
         self.root.configure(bg="#12121a")
         self.root.minsize(440, 280)
 
@@ -58,53 +49,25 @@ class ScoreboardApp:
             base_family = "Consolas"
 
         self.title_font = tkfont.Font(family=base_family, size=18, weight="bold")
-        self.song_font = tkfont.Font(family=base_family, size=14)
         self.header_font = tkfont.Font(family=base_family, size=10, weight="bold")
         self.row_font = tkfont.Font(family=base_family, size=12)
-        self.status_font = tkfont.Font(family=base_family, size=10)
 
-        tk.Label(
+        chart_title = _song_fallback() or "—"
+        self.lbl_title = tk.Label(
             self.root,
-            text="Piano Tiles",
+            text=chart_title,
             font=self.title_font,
-            fg="#e8e8f0",
-            bg="#12121a",
-        ).pack(pady=(12, 2))
-
-        port_lbl = f"UDP :{ptg.SCOREBOARD_UDP_PORT}"
-        tk.Label(
-            self.root,
-            text=port_lbl,
-            font=self.status_font,
-            fg="#606078",
-            bg="#12121a",
-        ).pack(pady=(0, 4))
-
-        self.lbl_song = tk.Label(
-            self.root,
-            text="—",
-            font=self.song_font,
             fg="#7eb6ff",
             bg="#12121a",
             wraplength=520,
             justify=tk.CENTER,
         )
-        self.lbl_song.pack(pady=(0, 8))
-
-        self.lbl_status = tk.Label(
-            self.root,
-            text="",
-            font=self.status_font,
-            fg="#8888a0",
-            bg="#12121a",
-            wraplength=520,
-        )
-        self.lbl_status.pack(pady=(0, 6))
+        self.lbl_title.pack(pady=(12, 10))
 
         hdr = tk.Frame(self.root, bg="#1e1e2e")
         hdr.pack(fill=tk.X, padx=12, pady=4)
-        headers = ("Player", "Score", "Streak", "Next ×")
-        widths = (14, 10, 8, 8)
+        headers = ("Player", "Score")
+        widths = (14, 10)
         for i, text in enumerate(headers):
             tk.Label(
                 hdr,
@@ -124,7 +87,7 @@ class ScoreboardApp:
         self.player_labels: list[list[tk.Label]] = []
         for r in range(MAX_PLAYER_ROWS):
             row_widgets: list[tk.Label] = []
-            for c in range(4):
+            for c in range(2):
                 lbl = tk.Label(
                     self.rows_frame,
                     text="—",
@@ -141,8 +104,8 @@ class ScoreboardApp:
             self.player_labels.append(row_widgets)
 
         if self._bind_error:
-            self.lbl_status.config(
-                text=f"Could not bind UDP port {ptg.SCOREBOARD_UDP_PORT}: {self._bind_error}",
+            self.lbl_title.config(
+                text=f"UDP :{ptg.SCOREBOARD_UDP_PORT} — bind failed: {self._bind_error}",
                 fg="#ff6666",
             )
 
@@ -181,32 +144,20 @@ class ScoreboardApp:
         self._drain_udp()
 
         if self._last is None:
-            song = _song_fallback() or "—"
-            self.lbl_song.config(text=song)
             if not self._bind_error:
-                self.lbl_status.config(
-                    text=f"Waiting for packets on UDP {ptg.SCOREBOARD_UDP_PORT}…",
-                    fg="#8888a0",
-                )
+                song = _song_fallback() or "—"
+                self.lbl_title.config(text=song, fg="#7eb6ff")
             for row in self.player_labels:
-                for c in range(4):
-                    row[c].config(text="—" if c < 2 else "", fg="#505068")
+                for c in range(2):
+                    row[c].config(text="—", fg="#505068")
             self.root.after(POLL_MS, self._poll)
             return
 
-        data = self._last
-        song = (data.get("song") or "").strip() or _song_fallback() or "—"
-        self.lbl_song.config(text=song)
+        if not self._bind_error:
+            song = _song_fallback() or "—"
+            self.lbl_title.config(text=song, fg="#7eb6ff")
 
-        state = data.get("state", "?")
-        n = data.get("num_players", 0)
-        cmax = data.get("combo_max", ptg.COMBO_MAX)
-        self.lbl_status.config(
-            text=f"State: {state}   ·   Players: {n}   ·   Combo cap (×): {cmax}",
-            fg="#8888a0",
-        )
-
-        players = data.get("players")
+        players = self._last.get("players")
         if not isinstance(players, list):
             players = []
 
@@ -217,11 +168,8 @@ class ScoreboardApp:
                 slot = int(p.get("slot", i))
                 row[0].config(text=f"Player {slot + 1}", fg="#d0d0e0")
                 row[1].config(text=str(p.get("score", 0)), fg="#d0d0e0")
-                row[2].config(text=str(p.get("combo", 0)), fg="#d0d0e0")
-                nx = p.get("combo_mult_next", 1)
-                row[3].config(text=str(nx), fg="#a8d896")
             else:
-                for c in range(4):
+                for c in range(2):
                     row[c].config(text="", fg="#505068")
 
         self.root.after(POLL_MS, self._poll)

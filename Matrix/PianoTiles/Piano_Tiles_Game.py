@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import sys
 import socket
 import threading
 import time
@@ -15,13 +14,6 @@ from typing import List, Optional, Set, Tuple
 # ---------------------------------------------------------------------------
 _CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "piano_tiles_config.json")
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_MATRIX_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, ".."))
-if _MATRIX_DIR not in sys.path:
-    sys.path.insert(0, _MATRIX_DIR)
-try:
-    from small_font import FONT_3x5
-except ImportError:
-    FONT_3x5 = None  # type: ignore[misc, assignment]
 
 
 def _load_config() -> dict:
@@ -67,17 +59,16 @@ NUM_PLAYER_SLOTS = 4
 
 SAFE_X0, SAFE_X1 = 0, 1
 # Two columns: each lane row shows one palette color (stacked vertically), like a row-based keyboard.
-KEY_STACK_X0, KEY_STACK_X1 = 2, 3
+KEY_STACK_X0, KEY_STACK_X1 = 2, 2
 # Single column where scrolling tiles must align for scoring (divider before the track).
 TARGET_STRIP_X = 8
 RIGHT_GRAY_X = 8
-TRACK_X0, TRACK_X1 = 4, 15
+TRACK_X0, TRACK_X1 = 3, 15
 
 TOP_EDGE_ROW = 0
 BOTTOM_EDGE_ROW = 31
 
 BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
@@ -107,13 +98,15 @@ ROW_NAME_TO_INDEX = {
 
 TILE_MIN_WIDTH = 1
 TILE_MAX_WIDTH = 10
-# width >= this: one constant score on hit; else single tap score on hit.
+# width >= this: score every tick while key held and tile overlaps key column; else one tap score.
 LONG_TILE_THRESHOLD = 4
 SCROLL_SPEED = 4.5
 SPAWN_MIN_INTERVAL = 0.45
 SPAWN_MAX_INTERVAL = 1.15
 TAP_SCORE = 25
 WIDE_TILE_SCORE = 100
+# Wide tiles: points per second while pressed and overlapping the key stack (tuned ~ like old one-shot wide).
+WIDE_TILE_HOLD_SCORE_PER_SEC = WIDE_TILE_SCORE * SCROLL_SPEED / float(LONG_TILE_THRESHOLD)
 COMBO_MAX = 8
 _ID_COUNTER = 0
 
@@ -249,6 +242,12 @@ class MovingTile:
         left = self.int_left()
         right = left + self.width - 1
         return not (left > cx or right < cx)
+
+    def overlaps_key_stack(self) -> bool:
+        """True when the scrolling tile covers the lane key column(s) (KEY_STACK_X0..KEY_STACK_X1)."""
+        left = self.int_left()
+        right = left + self.width - 1
+        return not (right < KEY_STACK_X0 or left > KEY_STACK_X1)
 
     def fully_past_target(self) -> bool:
         cx = self.target_column_x()
@@ -428,27 +427,34 @@ class PianoTilesGame:
                 )
             )
 
-    def _apply_scoring(self, _dt: float) -> None:
+    def _apply_scoring(self, dt: float) -> None:
         for t in self.tiles:
             if t.slot >= self.num_players:
                 continue
-            if not t.overlaps_target_strip():
+            if not t.overlaps_key_stack():
                 continue
             expected = TARGET_PALETTE[t.row_in_lane]
             if t.color != expected:
                 continue
             if not self.pad_pressed(t.slot, t.row_in_lane):
                 continue
-            if t.tap_awarded:
-                continue
             p = self.players[t.slot]
-            mult = self._combo_multiplier(p.combo)
             if t.width >= LONG_TILE_THRESHOLD:
-                p.score += WIDE_TILE_SCORE * mult
+                mult = self._combo_multiplier(p.combo)
+                if not t.tap_awarded:
+                    p.combo += 1
+                    t.tap_awarded = True
+                gain = round(WIDE_TILE_HOLD_SCORE_PER_SEC * mult * dt)
+                if gain < 1:
+                    gain = 1
+                p.score += gain
             else:
+                if t.tap_awarded:
+                    continue
+                mult = self._combo_multiplier(p.combo)
                 p.score += TAP_SCORE * mult
-            p.combo += 1
-            t.tap_awarded = True
+                p.combo += 1
+                t.tap_awarded = True
 
     def _tile_missed_reset_combo(self, t: MovingTile) -> None:
         if t.slot < 0 or t.slot >= self.num_players:
@@ -552,43 +558,6 @@ class PianoTilesGame:
                 if TRACK_X0 <= x <= TRACK_X1:
                     self.set_led(buffer, x, wy, t.color)
 
-    def _draw_string_3x5(
-        self,
-        buffer: bytearray,
-        text: str,
-        x0: int,
-        y0: int,
-        color: Tuple[int, int, int],
-    ) -> None:
-        if FONT_3x5 is None:
-            return
-        x = x0
-        for ch in text:
-            cols = FONT_3x5.get(ch, FONT_3x5.get(" ", [0, 0, 0]))
-            for col_idx, col_byte in enumerate(cols):
-                px = x + col_idx
-                if px < 0 or px >= BOARD_WIDTH:
-                    continue
-                for row_idx in range(5):
-                    if (col_byte >> row_idx) & 1:
-                        py = y0 + row_idx
-                        if 0 <= py < 32:
-                            self.set_led(buffer, px, py, color)
-            x += 4
-
-    def _draw_player_score_hud(self, buffer: bytearray) -> None:
-        if FONT_3x5 is None:
-            return
-        for slot in range(self.num_players):
-            if slot >= len(self.players):
-                break
-            score = max(0, min(9999, self.players[slot].score))
-            text = f"{score:4d}"
-            text_w = len(text) * 4 - 1
-            x0 = max(TRACK_X0, BOARD_WIDTH - text_w)
-            y0 = lane_band_top(slot)
-            self._draw_string_3x5(buffer, text, x0, y0, WHITE)
-
     def render(self) -> bytearray:
         buffer = bytearray(FRAME_DATA_LENGTH)
         with self.lock:
@@ -605,7 +574,6 @@ class PianoTilesGame:
             for slot in range(NUM_PLAYER_SLOTS):
                 self._draw_lane_background(buffer, slot, slot < self.num_players)
             self._draw_tiles(buffer)
-            self._draw_player_score_hud(buffer)
         return buffer
 
 
@@ -799,7 +767,7 @@ def main() -> None:
     print("Piano Tiles (matrix) — UDP out:", UDP_SEND_PORT, " listen:", UDP_LISTEN_PORT)
     print("Simulator: Port IN (listen) =", UDP_SEND_PORT, " Port OUT (send) =", UDP_LISTEN_PORT)
     print(
-        "Input: click the colored key columns (x=2–3) on each lane row in the simulator, "
+        "Input: click the colored key column (x=2) on each lane row in the simulator, "
         "or use physical foot pads on channel 7 (rows 29–30)."
     )
     chart_path = _chart_path_from_config()
@@ -807,7 +775,7 @@ def main() -> None:
     print("Chart file:", chart_path, f"({chart_n} tile waves)" if chart_n else "(missing or empty — random spawn)")
     print("Commands: start <1-4> | scores | reset | pause | resume | quit")
     print(
-        f"Scoreboard (UDP): python piano_tiles_scoreboard.py  — listen on port {SCOREBOARD_UDP_PORT}"
+        f"Scoreboard (UDP JSON, not live_state file): python piano_tiles_scoreboard.py  — port {SCOREBOARD_UDP_PORT}"
     )
 
     game = PianoTilesGame()
