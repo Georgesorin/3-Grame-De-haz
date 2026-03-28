@@ -12,7 +12,7 @@ First team to 20 points wins and ends the game.
 Run:  python ColorTest.py
 """
 
-import os, sys, random, threading, time
+import os, sys, random, threading, time, math
 import tkinter as tk
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -92,6 +92,22 @@ FG_RED   = "#ff4444"
 FG_GOLD  = "#ffd700"
 FONT_SM  = ("Consolas", 12, "bold")
 FONT_XS  = ("Consolas", 10)
+
+
+def _hex_to_rgb(h):
+    h = (h or "#000").lstrip("#")
+    if len(h) != 6:
+        return 0, 0, 0
+    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(r, g, b):
+    return f"#{max(0, min(255, int(r))):02x}{max(0, min(255, int(g))):02x}{max(0, min(255, int(b))):02x}"
+
+
+def _lerp_rgb(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return tuple(x + (y - x) * t for x, y in zip(a, b))
 
 
 def _make_lbl_btn(parent, text, command, bg, fg=FG_MAIN, **kw):
@@ -449,12 +465,196 @@ class ColorRushApp(tk.Tk):
         for frm in (self._frame_setup, self._frame_game):
             frm.place(relx=0, rely=0, relwidth=1, relheight=1)
 
+        self._ambient_phase = 0
+        self._screen = "setup"
+        self._swatch_target_hex = "#333333"
+        self._swatch_breathe_hold = False
+        self._hdr_pop_id = 0
+        self._score_pop_id = 0
+        self._victory_fx_id = 0
+        self._pal_chips = []
+
         self._build_setup()
         self._build_game()
         self._show_setup()
+        self.after(60, self._ambient_tick)
 
-    def _show_setup(self): self._frame_setup.lift()
-    def _show_game(self):  self._frame_game.lift()
+    def _show_setup(self):
+        self._screen = "setup"
+        self._frame_setup.lift()
+
+    def _show_game(self):
+        self._screen = "game"
+        self._frame_game.lift()
+
+    def _ambient_tick(self):
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._ambient_phase = (self._ambient_phase + 1) % 10_000
+        ph = self._ambient_phase * 0.12
+
+        if self._screen == "setup":
+            t = 0.5 + 0.5 * math.sin(ph)
+            c = _lerp_rgb(_hex_to_rgb("#cc2800"), _hex_to_rgb("#ff7a33"), t)
+            try:
+                self._setup_title.configure(fg=_rgb_to_hex(*c))
+            except tk.TclError:
+                pass
+            try:
+                sh = 0.5 + 0.5 * math.sin(ph * 1.7)
+                g = _lerp_rgb(_hex_to_rgb("#cc3000"), _hex_to_rgb("#ff5533"), sh)
+                self._setup_start_btn.configure(bg=_rgb_to_hex(*g))
+            except tk.TclError:
+                pass
+            try:
+                sb = 0.5 + 0.5 * math.sin(ph * 1.05 + 0.4)
+                gc = _lerp_rgb(_hex_to_rgb("#444444"), _hex_to_rgb("#909090"), sb * 0.4)
+                self._status_lbl.configure(fg=_rgb_to_hex(*gc))
+            except tk.TclError:
+                pass
+
+        elif self._screen == "game":
+            st = getattr(self._game, "state", S_SETUP)
+            if st == S_PLAY and not self._swatch_breathe_hold:
+                base = _hex_to_rgb(self._swatch_target_hex)
+                if sum(base) > 40:
+                    br = 0.5 + 0.5 * math.sin(ph * 2.1)
+                    dim = tuple(x * 0.55 for x in base)
+                    lit = tuple(min(255, x * 1.15 + 35) for x in base)
+                    mix = _lerp_rgb(dim, lit, br)
+                    try:
+                        self._swatch.configure(bg=_rgb_to_hex(*mix))
+                        edge = _lerp_rgb(_hex_to_rgb("#222"), base, 0.35 + 0.25 * br)
+                        self._swatch_wrap.configure(highlightbackground=_rgb_to_hex(*edge))
+                    except tk.TclError:
+                        pass
+            if self._pal_chips:
+                i = self._ambient_phase % len(self._pal_chips)
+                for j, lbl in enumerate(self._pal_chips):
+                    try:
+                        if j == i:
+                            lbl.configure(relief="solid", borderwidth=2)
+                        else:
+                            lbl.configure(relief="solid", borderwidth=1)
+                    except tk.TclError:
+                        pass
+            try:
+                tb = 0.5 + 0.5 * math.sin(ph * 0.85)
+                g = _lerp_rgb(_hex_to_rgb(FG_DIM), _hex_to_rgb("#707070"), tb * 0.45)
+                self._lbl_targets.configure(fg=_rgb_to_hex(*g))
+                pb = 0.5 + 0.5 * math.sin(ph * 0.65 + 1.1)
+                g2 = _lerp_rgb(_hex_to_rgb(FG_DIM), _hex_to_rgb("#5a5a5a"), pb * 0.35)
+                self._lbl_palette_names.configure(fg=_rgb_to_hex(*g2))
+            except tk.TclError:
+                pass
+
+        self.after(90, self._ambient_tick)
+
+    def _flash_swatch_pop(self, hex_color):
+        self._swatch_breathe_hold = True
+        seq = ["#ffffff", hex_color, "#f0f0f0", hex_color, hex_color]
+        ms = [38, 42, 36, 48, 0]
+
+        def step(i):
+            if i >= len(seq):
+                try:
+                    self._swatch.configure(bg=hex_color)
+                except tk.TclError:
+                    pass
+                self._swatch_breathe_hold = False
+                return
+            try:
+                self._swatch.configure(bg=seq[i])
+            except tk.TclError:
+                self._swatch_breathe_hold = False
+                return
+            self.after(ms[i], lambda: step(i + 1))
+
+        step(0)
+
+    def _pop_team_header(self, big=True):
+        self._hdr_pop_id += 1
+        hid = self._hdr_pop_id
+        sizes = (22, 26, 32, 28, 24, 22) if big else (22, 25, 24, 22)
+
+        def step(i):
+            if self._hdr_pop_id != hid or i >= len(sizes):
+                try:
+                    self._lbl_team.configure(font=("Consolas", 22, "bold"))
+                except tk.TclError:
+                    pass
+                return
+            try:
+                self._lbl_team.configure(font=("Consolas", sizes[i], "bold"))
+            except tk.TclError:
+                return
+            self.after(48, lambda: step(i + 1))
+
+        step(0)
+
+    def _pulse_score_panel(self, team_i):
+        if team_i < 0 or team_i >= len(self._score_panels):
+            return
+        self._score_pop_id += 1
+        pid = self._score_pop_id
+        _, _, sl = self._score_panels[team_i]
+        sizes = (18, 24, 30, 24, 18)
+
+        def step(i):
+            if self._score_pop_id != pid or i >= len(sizes):
+                try:
+                    sl.configure(font=("Consolas", 18, "bold"))
+                except tk.TclError:
+                    pass
+                return
+            try:
+                sl.configure(font=("Consolas", sizes[i], "bold"))
+            except tk.TclError:
+                return
+            self.after(50, lambda: step(i + 1))
+
+        step(0)
+
+    def _nudge_mode_banner(self, must_press):
+        base = FG_GREEN if must_press else FG_RED
+        hi = "#aaffcc" if must_press else "#ff8888"
+
+        def flash(on):
+            try:
+                self._lbl_mode_banner.configure(fg=hi if on else base)
+            except tk.TclError:
+                return
+            if on:
+                self.after(70, lambda: flash(False))
+
+        flash(True)
+
+    def _run_victory_fx(self, team_hex):
+        self._victory_fx_id += 1
+        vid = self._victory_fx_id
+        steps = 24
+
+        def step(i):
+            if self._victory_fx_id != vid:
+                return
+            if i >= steps:
+                try:
+                    self._lbl_team.configure(fg=team_hex)
+                except tk.TclError:
+                    pass
+                return
+            t = 0.5 + 0.5 * math.sin(i * 0.65)
+            c = _lerp_rgb(_hex_to_rgb(team_hex), (255, 255, 220), t * 0.55)
+            try:
+                self._lbl_team.configure(fg=_rgb_to_hex(*c))
+            except tk.TclError:
+                return
+            self.after(50, lambda: step(i + 1))
+
+        step(0)
 
     # ─────────────────────────────────────────────────────────────────────────
     # SETUP
@@ -465,11 +665,18 @@ class ColorRushApp(tk.Tk):
         self._status_lbl = tk.Label(f, text="Ready", bg=BG_DARK, fg=FG_DIM, font=FONT_XS)
         self._status_lbl.pack(side=tk.BOTTOM, pady=(0, 8))
 
-        _make_lbl_btn(f, "▶   START GAME", self._start_game,
-                      bg="#ff3c00", fg="white",
-                      font=("Consolas", 20, "bold"),
-                      padx=50, pady=18,
-                      hover_bg="#cc3000").pack(side=tk.BOTTOM, pady=(6, 6))
+        self._setup_start_btn = _make_lbl_btn(
+            f,
+            "▶   START GAME",
+            self._start_game,
+            bg="#ff3c00",
+            fg="white",
+            font=("Consolas", 20, "bold"),
+            padx=50,
+            pady=18,
+            hover_bg="#cc3000",
+        )
+        self._setup_start_btn.pack(side=tk.BOTTOM, pady=(6, 6))
 
         mid = tk.Frame(f, bg=BG_DARK)
         mid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -478,8 +685,14 @@ class ColorRushApp(tk.Tk):
         col = tk.Frame(mid, bg=BG_DARK)
         col.grid(row=0, column=0)
 
-        tk.Label(col, text="COLOR RUSH", bg=BG_DARK, fg="#ff3c00",
-                 font=("Consolas", 36, "bold")).pack(anchor=tk.CENTER, pady=(0, 4))
+        self._setup_title = tk.Label(
+            col,
+            text="COLOR RUSH",
+            bg=BG_DARK,
+            fg="#ff3c00",
+            font=("Consolas", 36, "bold"),
+        )
+        self._setup_title.pack(anchor=tk.CENTER, pady=(0, 4))
 
 
         tk.Label(col, text="NUMBER OF PLAYERS", bg=BG_DARK, fg=FG_DIM,
@@ -560,8 +773,12 @@ class ColorRushApp(tk.Tk):
             center, text="", bg=BG_DARK, fg=FG_GOLD,
             font=("Consolas", 14, "bold"))
         self._lbl_mode_banner.pack(anchor=tk.CENTER, pady=(0, 6))
-        self._swatch = tk.Frame(center, width=100, height=100, bg="#333333")
-        self._swatch.pack(anchor=tk.CENTER)
+        self._swatch_wrap = tk.Frame(
+            center, bg=BG_DARK, highlightthickness=2, highlightbackground="#333"
+        )
+        self._swatch_wrap.pack(anchor=tk.CENTER)
+        self._swatch = tk.Frame(self._swatch_wrap, width=100, height=100, bg="#333333")
+        self._swatch.pack(padx=8, pady=8)
         self._swatch.pack_propagate(False)
         self._lbl_avoid = tk.Label(center, text="—", bg=BG_DARK, fg=FG_MAIN,
                                    font=("Consolas", 28, "bold"))
@@ -573,16 +790,32 @@ class ColorRushApp(tk.Tk):
             justify=tk.CENTER)
         self._lbl_targets.pack(anchor=tk.CENTER, pady=(8, 0))
 
+        self._pal_chips = []
         pal_row = tk.Frame(center, bg=BG_DARK)
         pal_row.pack(anchor=tk.CENTER, pady=(12, 0))
-        for i, hx in enumerate(PALETTE_HEX):
-            tk.Label(pal_row, text="  ", bg=hx, width=3, height=1,
-                     relief="solid", borderwidth=1).pack(side=tk.LEFT, padx=3)
-        tk.Label(center, text=" ".join(PALETTE_NAMES), bg=BG_DARK, fg=FG_DIM,
-                 font=("Consolas", 8)).pack(anchor=tk.CENTER, pady=(4, 0))
+        for hx in PALETTE_HEX:
+            chip = tk.Label(
+                pal_row,
+                text="  ",
+                bg=hx,
+                width=3,
+                height=1,
+                relief="solid",
+                borderwidth=1,
+            )
+            chip.pack(side=tk.LEFT, padx=3)
+            self._pal_chips.append(chip)
+        self._lbl_palette_names = tk.Label(
+            center,
+            text=" ".join(PALETTE_NAMES),
+            bg=BG_DARK,
+            fg=FG_DIM,
+            font=("Consolas", 8),
+        )
+        self._lbl_palette_names.pack(anchor=tk.CENTER, pady=(4, 0))
 
     # ── Updates ───────────────────────────────────────────────────────────────
-    def _update_panels(self, scores, num_teams, highlight=-1):
+    def _update_panels(self, scores, num_teams, highlight=-1, pulse_highlight=False):
         for pf, *_ in self._score_panels:
             pf.pack_forget()
         for i in range(num_teams):
@@ -594,14 +827,18 @@ class ColorRushApp(tk.Tk):
                 highlightthickness=3 if i == highlight else 0,
             )
             pf.pack(side=tk.LEFT, padx=6, pady=6)
+        if pulse_highlight and highlight >= 0:
+            self._pulse_score_panel(highlight)
 
     def _set_target_ui(self, name, hex_color, must_press):
-        self._swatch.configure(bg=hex_color)
+        self._swatch_target_hex = hex_color
         self._lbl_avoid.configure(text=name.upper(), fg=hex_color)
         self._lbl_mode_banner.configure(
             text="PRESS this color" if must_press else "DO NOT press this color",
             fg=FG_GREEN if must_press else FG_RED,
         )
+        self._flash_swatch_pop(hex_color)
+        self._nudge_mode_banner(must_press)
 
     # ── Events ────────────────────────────────────────────────────────────────
     def _on_game_event(self, event, data):
@@ -610,6 +847,7 @@ class ColorRushApp(tk.Tk):
     def _dispatch(self, event, data):
         if event == "game_start":
             self._lbl_team.configure(text="Color Rush", fg=FG_GOLD)
+            self._pop_team_header(big=False)
 
             self._set_target_ui(
                 data["target_name"], data["target_hex"], data.get("must_press", True))
@@ -623,13 +861,18 @@ class ColorRushApp(tk.Tk):
         elif event == "point":
             self._lbl_team.configure(
                 text=f"+1  {data['name']}", fg=TEAM_HEX[data["team"]])
-            self._update_panels(data["scores"], self._game.num_teams,
-                                highlight=data["team"])
+            self._pop_team_header(big=True)
+            self._update_panels(
+                data["scores"],
+                self._game.num_teams,
+                highlight=data["team"],
+                pulse_highlight=True,
+            )
 
         elif event == "game_over":
-            self._lbl_team.configure(
-                text=f"🏆  {data['name']}  wins!",
-                fg=TEAM_HEX[data["team"]])
+            th = TEAM_HEX[data["team"]]
+            self._lbl_team.configure(text=f"🏆  {data['name']}  wins!", fg=th)
+            self._run_victory_fx(th)
             self._update_panels(data["scores"], self._game.num_teams,
                                 highlight=data["team"])
 
@@ -670,8 +913,13 @@ class ColorRushApp(tk.Tk):
             self._start_game()
 
     def _launch(self, s):
+        self._hdr_pop_id += 1
+        self._score_pop_id += 1
+        self._victory_fx_id += 1
+        self._swatch_target_hex = "#333333"
+        self._swatch_breathe_hold = False
         self._game.start_game(**s)
-        self._lbl_team.configure(text="", fg=FG_MAIN)
+        self._lbl_team.configure(text="", fg=FG_MAIN, font=("Consolas", 22, "bold"))
         self._swatch.configure(bg="#333333")
         self._lbl_avoid.configure(text="—", fg=FG_MAIN)
         self._lbl_mode_banner.configure(text="", fg=FG_DIM)
@@ -680,9 +928,15 @@ class ColorRushApp(tk.Tk):
         self._show_game()
 
     def _stop_game(self):
+        self._hdr_pop_id += 1
+        self._score_pop_id += 1
+        self._victory_fx_id += 1
         self._game.stop_game()
 
     def _go_setup(self):
+        self._hdr_pop_id += 1
+        self._score_pop_id += 1
+        self._victory_fx_id += 1
         self._game.stop_game()
         self._show_setup()
 
