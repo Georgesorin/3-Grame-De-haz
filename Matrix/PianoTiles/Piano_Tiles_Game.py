@@ -4,6 +4,7 @@ import json
 import os
 import random
 import socket
+import pygame
 import sys
 import threading
 import time
@@ -1087,6 +1088,9 @@ def main() -> None:
     game.chart_title_override = song_entries[si][1]
     game.state = "LOBBY"
     game.start_game(num_players)
+    pygame.mixer.init()
+    pygame.mixer.music.load("./song_charts/test.mp3")
+    pygame.mixer.music.play()
     print(f"Started with {game.num_players} player(s).")
 
     net = NetworkManager(game)
