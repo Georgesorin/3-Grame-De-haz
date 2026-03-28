@@ -1,0 +1,8 @@
+{
+  "songName": "Quick test",
+  "tiles": [
+    { "t": 0.0, "row": 0, "width": 2 },
+    { "t": 0.5, "row": 3, "width": 3 },
+    { "t": 1.0, "row": 5, "width": 2 }
+  ]
+}

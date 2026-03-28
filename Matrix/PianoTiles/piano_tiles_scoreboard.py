@@ -52,17 +52,20 @@ class ScoreboardApp:
         self.header_font = tkfont.Font(family=base_family, size=10, weight="bold")
         self.row_font = tkfont.Font(family=base_family, size=12)
 
-        chart_title = _song_fallback() or "—"
         self.lbl_title = tk.Label(
             self.root,
-            text=chart_title,
+            text="Waiting for game…",
             font=self.title_font,
             fg="#7eb6ff",
             bg="#12121a",
             wraplength=520,
             justify=tk.CENTER,
         )
-        self.lbl_title.pack(pady=(12, 10))
+        self.lbl_title.pack(pady=(12, 6))
+
+        accent = tk.Frame(self.root, bg="#3d7adb", height=3)
+        accent.pack_propagate(False)
+        accent.pack(fill=tk.X, padx=80, pady=(0, 10))
 
         hdr = tk.Frame(self.root, bg="#1e1e2e")
         hdr.pack(fill=tk.X, padx=12, pady=4)
@@ -145,8 +148,7 @@ class ScoreboardApp:
 
         if self._last is None:
             if not self._bind_error:
-                song = _song_fallback() or "—"
-                self.lbl_title.config(text=song, fg="#7eb6ff")
+                self.lbl_title.config(text="Waiting for game…", fg="#7eb6ff")
             for row in self.player_labels:
                 for c in range(2):
                     row[c].config(text="—", fg="#505068")
@@ -154,8 +156,12 @@ class ScoreboardApp:
             return
 
         if not self._bind_error:
-            song = _song_fallback() or "—"
-            self.lbl_title.config(text=song, fg="#7eb6ff")
+            song = self._last.get("song")
+            if isinstance(song, str) and song.strip():
+                display = song.strip()
+            else:
+                display = _song_fallback() or "—"
+            self.lbl_title.config(text=display, fg="#7eb6ff")
 
         players = self._last.get("players")
         if not isinstance(players, list):

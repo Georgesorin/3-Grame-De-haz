@@ -4,6 +4,7 @@ import json
 import os
 import random
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -162,6 +163,60 @@ def read_song_title_from_chart(path: str) -> str:
     return ""
 
 
+def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
+    """Resolve songs from piano_tiles_chart.json (manifest or legacy single chart).
+
+    Returns list of (absolute_chart_path, display_title). Paths in manifest are
+    relative to the catalog file's directory.
+    """
+    catalog_path = os.path.abspath(catalog_path)
+    base_dir = os.path.dirname(catalog_path)
+    try:
+        with open(catalog_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    songs = data.get("songs")
+    if isinstance(songs, list) and songs:
+        out: List[Tuple[str, str]] = []
+        for item in songs:
+            if not isinstance(item, dict):
+                continue
+            rel = item.get("file") or item.get("path") or item.get("chart")
+            if not isinstance(rel, str) or not rel.strip():
+                continue
+            rel = rel.strip().replace("\\", "/")
+            chart_path = rel if os.path.isabs(rel) else os.path.normpath(os.path.join(base_dir, rel))
+            if os.path.abspath(chart_path) == catalog_path:
+                continue
+            if not os.path.isfile(chart_path):
+                continue
+            title = None
+            for key in ("songName", "song", "title", "name", "label"):
+                v = item.get(key)
+                if isinstance(v, str) and v.strip():
+                    title = v.strip()
+                    break
+            if not title:
+                title = read_song_title_from_chart(chart_path)
+            if not title:
+                title = os.path.basename(chart_path)
+            out.append((chart_path, title.strip()))
+        return out
+
+    if isinstance(data.get("tiles"), list):
+        title = read_song_title_from_chart(catalog_path)
+        if not title:
+            sn = data.get("songName")
+            title = sn.strip() if isinstance(sn, str) and sn.strip() else os.path.basename(catalog_path)
+        return [(catalog_path, title)]
+
+    return []
+
+
 def load_chart_sequence(path: str) -> List[ChartEvent]:
     if not os.path.isfile(path):
         return []
@@ -286,14 +341,29 @@ class PianoTilesGame:
     _paused_at: float = 0.0
     chart_song_title: str = ""
     _last_scoreboard_broadcast: float = 0.0
+    _song_end_message_printed: bool = False
+    # When set, chart JSON for gameplay (overrides config chart_file).
+    chart_file_override: Optional[str] = None
+    # Title from piano_tiles_chart.json manifest (songs[].songName); wins over leaf chart file.
+    chart_title_override: Optional[str] = None
+
+    def _active_chart_path(self) -> str:
+        if self.chart_file_override:
+            return self.chart_file_override
+        return _chart_path_from_config()
+
+    def _resolve_chart_song_title(self) -> str:
+        if self.chart_title_override and str(self.chart_title_override).strip():
+            return str(self.chart_title_override).strip()
+        return read_song_title_from_chart(self._active_chart_path())
 
     def refresh_song_title_from_chart(self) -> None:
-        self.chart_song_title = read_song_title_from_chart(_chart_path_from_config())
+        self.chart_song_title = self._resolve_chart_song_title()
 
     def _reload_chart(self) -> None:
-        path = _chart_path_from_config()
+        path = self._active_chart_path()
         self.chart_events = load_chart_sequence(path)
-        self.chart_song_title = read_song_title_from_chart(path)
+        self.chart_song_title = self._resolve_chart_song_title()
 
     @staticmethod
     def _combo_multiplier(combo_streak: int) -> int:
@@ -349,6 +419,7 @@ class PianoTilesGame:
             self.chart_origin_time = time.time()
             self.next_spawn_time = time.time()
             self.last_tick = time.time()
+            self._song_end_message_printed = False
             self.state = "PLAYING"
 
     def reset(self) -> None:
@@ -500,6 +571,19 @@ class PianoTilesGame:
                 else:
                     self._tile_missed_reset_combo(t)
             self.tiles = survivors
+
+            if (
+                len(self.chart_events) > 0
+                and self.chart_next_index >= len(self.chart_events)
+                and not self.tiles
+            ):
+                self.state = "ENDED"
+                if not self._song_end_message_printed:
+                    self._song_end_message_printed = True
+                    print(
+                        "\nSong finished. Game stopped (ENDED). "
+                        "Use 'scores' or 'start <1-4>' — at the prompt, q or Esc exits."
+                    )
 
             for i in range(64):
                 self.prev_button_states[i] = self.button_states[i]
@@ -763,25 +847,247 @@ def _game_loop(game: PianoTilesGame) -> None:
         time.sleep(0.016)
 
 
+def _read_nav_key() -> str:
+    """Return up, down, enter, or quit (Esc / q). W/S work as up/down."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        while True:
+            c = msvcrt.getch()
+            if c in (b"\r", b"\n"):
+                return "enter"
+            if c == b"\x1b":
+                return "quit"
+            if c in (b"q", b"Q"):
+                return "quit"
+            if c in (b"w", b"W"):
+                return "up"
+            if c in (b"s", b"S"):
+                return "down"
+            if c in (b"\xe0", b"\x00"):
+                c2 = msvcrt.getch()
+                if c2 == b"H":
+                    return "up"
+                if c2 == b"P":
+                    return "down"
+    else:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in "\r\n":
+                    return "enter"
+                if ch in ("q", "Q"):
+                    return "quit"
+                if ch in ("w", "W"):
+                    return "up"
+                if ch in ("s", "S"):
+                    return "down"
+                if ch == "\x1b":
+                    nxt = sys.stdin.read(1)
+                    if nxt == "[":
+                        c3 = sys.stdin.read(1)
+                        if c3 == "A":
+                            return "up"
+                        if c3 == "B":
+                            return "down"
+                    return "quit"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _stdout_supports_ansi_redraw() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            STD_OUTPUT_HANDLE = -11
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            h = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+                return False
+            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if not kernel32.SetConsoleMode(h, new_mode):
+                return False
+        except (AttributeError, OSError, TypeError):
+            return False
+    return True
+
+
+def _print_menu_block(title: str, options: List[str], idx: int) -> int:
+    """Draw the menu; return how many lines were printed (for cursor rewind)."""
+    n = 0
+    print(title)
+    n += 1
+    print("Press : ↑ / ↓  to navigate")
+    n += 1
+    print()
+    n += 1
+    for i, opt in enumerate(options):
+        prefix = " > " if i == idx else "   "
+        print(f"{prefix}{opt}")
+        n += 1
+    return n
+
+
+def read_command_line(prompt: str) -> str:
+    """Read one command at the prompt. Lone q/Q or Esc quits without Enter."""
+    if not sys.stdin.isatty():
+        return input(prompt).strip()
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    buf: List[str] = []
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        while True:
+            c = msvcrt.getch()
+            if c in (b"\r", b"\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(buf).strip()
+            if c == b"\x1b" and not buf:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "q"
+            if c in (b"q", b"Q") and not buf:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "q"
+            if c == b"\x03":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "q"
+            if c in (b"\x08", b"\x7f"):
+                if buf:
+                    buf.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if c in (b"\xe0", b"\x00"):
+                msvcrt.getch()
+                continue
+            if len(c) == 1 and 32 <= c[0] <= 126:
+                ch = chr(c[0])
+                buf.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+                continue
+    else:
+        import select
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in "\r\n":
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(buf).strip()
+                if ch == "\x1b":
+                    if select.select([sys.stdin], [], [], 0.02)[0]:
+                        ch2 = sys.stdin.read(1)
+                        if ch2 == "[":
+                            sys.stdin.read(1)
+                            continue
+                    if not buf:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return "q"
+                    continue
+                if ch in ("q", "Q") and not buf:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "q"
+                if ch == "\x03":
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "q"
+                if ch in ("\x08", "\x7f"):
+                    if buf:
+                        buf.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                    continue
+                if 32 <= ord(ch) <= 126:
+                    buf.append(ch)
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    return "".join(buf).strip()
+
+
+def terminal_menu_select(title: str, options: List[str]) -> int:
+    if not options:
+        raise ValueError("empty menu")
+    use_ansi = _stdout_supports_ansi_redraw()
+    idx = 0
+    prev_lines = 0
+    first_draw = True
+    while True:
+        if not first_draw and use_ansi:
+            sys.stdout.write(f"\033[{prev_lines}A\033[J")
+            sys.stdout.flush()
+        elif not first_draw:
+            print("─" * 48)
+        prev_lines = _print_menu_block(title, options, idx)
+        first_draw = False
+        sys.stdout.flush()
+        key = _read_nav_key()
+        if key == "up":
+            idx = (idx - 1) % len(options)
+        elif key == "down":
+            idx = (idx + 1) % len(options)
+        elif key == "enter":
+            return idx
+        elif key == "quit":
+            raise KeyboardInterrupt
+
+
 def main() -> None:
-    print("Piano Tiles (matrix) — UDP out:", UDP_SEND_PORT, " listen:", UDP_LISTEN_PORT)
-    print("Simulator: Port IN (listen) =", UDP_SEND_PORT, " Port OUT (send) =", UDP_LISTEN_PORT)
-    print(
-        "Input: click the colored key column (x=2) on each lane row in the simulator, "
-        "or use physical foot pads on channel 7 (rows 29–30)."
-    )
-    chart_path = _chart_path_from_config()
-    chart_n = len(load_chart_sequence(chart_path))
-    print("Chart file:", chart_path, f"({chart_n} tile waves)" if chart_n else "(missing or empty — random spawn)")
-    print("Commands: start <1-4> | scores | reset | pause | resume | quit")
-    print(
-        f"Scoreboard (UDP JSON, not live_state file): python piano_tiles_scoreboard.py  — port {SCOREBOARD_UDP_PORT}"
-    )
+    catalog_path = _chart_path_from_config()
+    song_entries = load_song_catalog_entries(catalog_path)
+    if not song_entries:
+        print("No songs found in", catalog_path)
+        print("Add a songs[] list or a legacy chart with top-level tiles.")
+        return
+
+    try:
+        player_labels = [f"{n} player{'s' if n != 1 else ''}" for n in range(1, NUM_PLAYER_SLOTS + 1)]
+        pi = terminal_menu_select("Number of players", player_labels)
+        num_players = pi + 1
+        song_labels = [t for _, t in song_entries]
+        si = terminal_menu_select("Song", song_labels)
+        selected_chart = song_entries[si][0]
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return
+
+    print()
 
     game = PianoTilesGame()
+    game.chart_file_override = selected_chart
+    game.chart_title_override = song_entries[si][1]
     game.state = "LOBBY"
-    game.setup_players(1)
-    game.refresh_song_title_from_chart()
+    game.start_game(num_players)
+    print(f"Started with {game.num_players} player(s).")
 
     net = NetworkManager(game)
     net.start_bg()
@@ -789,7 +1095,7 @@ def main() -> None:
 
     try:
         while game.running:
-            cmd = input("> ").strip().lower()
+            cmd = read_command_line("> ").strip().lower()
             if cmd in ("quit", "exit", "q"):
                 game.running = False
                 break
@@ -810,18 +1116,24 @@ def main() -> None:
                 game.reset()
                 print("Tiles cleared. Scores unchanged. Use 'start N' to reset players and scores.")
             elif cmd == "pause":
-                with game.lock:
-                    game.state = "PAUSED"
-                    game._paused_at = time.time()
-                print("Paused.")
+                if game.state == "ENDED":
+                    print("Game already ended.")
+                else:
+                    with game.lock:
+                        game.state = "PAUSED"
+                        game._paused_at = time.time()
+                    print("Paused.")
             elif cmd == "resume":
-                with game.lock:
-                    pause_len = time.time() - game._paused_at
-                    if game.chart_events:
-                        game.chart_origin_time += pause_len
-                    game.state = "PLAYING"
-                    game.last_tick = time.time()
-                print("Resumed.")
+                if game.state == "ENDED":
+                    print("Game already ended.")
+                else:
+                    with game.lock:
+                        pause_len = time.time() - game._paused_at
+                        if game.chart_events:
+                            game.chart_origin_time += pause_len
+                        game.state = "PLAYING"
+                        game.last_tick = time.time()
+                    print("Resumed.")
             elif cmd:
                 print("Unknown command.")
     except KeyboardInterrupt:
