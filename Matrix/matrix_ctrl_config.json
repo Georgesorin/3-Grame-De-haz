@@ -1,0 +1,7 @@
+{
+    "device_ip": "10.5.0.2",
+    "send_port": 5000,
+    "recv_port": 8000,
+    "last_used_ports": [],
+    "bind_ip": "0.0.0.0"
+}

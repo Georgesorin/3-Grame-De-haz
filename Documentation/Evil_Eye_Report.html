@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Evil Eye System Report</title>
+<style>
+body { font-family: 'Segoe UI', Tahoma, Verdana, sans-serif; background: #1e1e1e; color: #eee; padding: 20px; line-height: 1.6; }
+h1, h2, h3 { color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 5px; }
+.tab-group { background: #2d2d2d; border-radius: 5px; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); overflow: hidden; }
+.tabs { background: #333; overflow: hidden; display: flex; }
+.tabs button { flex: 1; background: inherit; border: none; padding: 12px 20px; color: #aaa; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.3s; }
+.tabs button:hover { background: #444; color: #fff; }
+.tabs button.active { background: #4CAF50; color: #fff; }
+.tabcontent { display: none; padding: 20px; background: #1a1a1a; overflow-x: auto; }
+pre { margin: 0; font-family: Consolas, monospace; color: #9cdcfe; font-size: 14px; }
+.desc { margin-bottom: 15px; font-size: 15px; }
+</style>
+<script>
+function openTab(e, id, grp) {
+    let c = document.getElementsByClassName(grp + "-c");
+    let l = document.getElementsByClassName(grp + "-l");
+    for(let i=0; i<c.length; i++) c[i].style.display = "none";
+    for(let i=0; i<l.length; i++) l[i].classList.remove("active");
+    document.getElementById(id).style.display = "block";
+    e.currentTarget.classList.add("active");
+}
+</script>
+</head>
+<body>
+<h1>Evil Eye System Report</h1>
+<h2>1. Verification Password (Checksum)</h2>
+<div class='desc'>The system uses a custom lookup table over a 256-byte array. Calculate the sum of all bytes in your dynamic payload block (without the checksum itself). Compute bitwise AND 0xFF on the sum. Use this value as the index for PASSWORD_ARRAY and append that resulting byte to the absolute tail end of the packet before streaming.<b>Documentation Needed:</b> Depending on language, standard UDP socket libraries (sys/socket.h, System.Net.Sockets, java.net, socket) and multi-threading capabilities (pthread/std::thread, System.Threading, java.lang.Thread) are required.</div>
+<div class='tab-group'>
+<div class='tabs'>
+<button class='pw-l active' onclick="openTab(event, 'pw-Python', 'pw')">Python</button>
+<button class='pw-l ' onclick="openTab(event, 'pw-C#', 'pw')">C#</button>
+<button class='pw-l ' onclick="openTab(event, 'pw-C++', 'pw')">C++</button>
+<button class='pw-l ' onclick="openTab(event, 'pw-Java', 'pw')">Java</button>
+<button class='pw-l ' onclick="openTab(event, 'pw-C', 'pw')">C</button>
+</div>
+<div id='pw-Python' class='tabcontent pw-c' style='display:block;'><pre><code>password_array = [
+    35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231, 16, 220, 99, 61, 25, 203, 203, 155, 107, 30, 92, 144, 218, 194, 226, 88, 196, 190, 67, 195, 159, 185, 209, 24, 163, 65, 25, 172, 126, 63, 224, 61, 160, 80, 125, 91, 239, 144, 25, 141, 183, 204, 171, 188, 255, 162, 104, 225, 186, 91, 232, 3, 100, 208, 49, 211, 37, 192, 20, 99, 27, 92, 147, 152, 86, 177, 53, 153, 94, 177, 200, 33, 175, 195, 15, 228, 247, 18, 244, 150, 165, 229, 212, 96, 84, 200, 168, 191, 38, 112, 171, 116, 121, 186, 147, 203, 30, 118, 115, 159, 238, 139, 60, 57, 235, 213, 159, 198, 160, 50, 97, 201, 253, 242, 240, 77, 102, 12, 183, 235, 243, 247, 75, 90, 13, 236, 56, 133, 150, 128, 138, 190, 140, 13, 213, 18, 7, 117, 255, 45, 69, 214, 179, 50, 28, 66, 123, 239, 190, 73, 142, 218, 253, 5, 212, 174, 152, 75, 226, 226, 172, 78, 35, 93, 250, 238, 19, 32, 247, 223, 89, 123, 86, 138, 150, 146, 214, 192, 93, 152, 156, 211, 67, 51, 195, 165, 66, 10, 10, 31, 1, 198, 234, 135, 34, 128, 208, 200, 213, 169, 238, 74, 221, 208, 104, 170, 166, 36, 76, 177, 196, 3, 141, 167, 127, 56, 177, 203, 45, 107, 46, 82, 217, 139, 168, 45, 198, 6, 43, 11, 57, 88, 182, 84, 189, 29, 35, 143, 138, 171
+]
+def calc_checksum(data: bytes) -&gt; int:
+    idx = sum(data) & 0xFF
+    return password_array[idx]</code></pre></div>
+<div id='pw-C#' class='tabcontent pw-c' style='display:none;'><pre><code>int[] password_array = {
+    35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231, 16, 220, 99, 61, 25, 203, 203, 155, 107, 30, 92, 144, 218, 194, 226, 88, 196, 190, 67, 195, 159, 185, 209, 24, 163, 65, 25, 172, 126, 63, 224, 61, 160, 80, 125, 91, 239, 144, 25, 141, 183, 204, 171, 188, 255, 162, 104, 225, 186, 91, 232, 3, 100, 208, 49, 211, 37, 192, 20, 99, 27, 92, 147, 152, 86, 177, 53, 153, 94, 177, 200, 33, 175, 195, 15, 228, 247, 18, 244, 150, 165, 229, 212, 96, 84, 200, 168, 191, 38, 112, 171, 116, 121, 186, 147, 203, 30, 118, 115, 159, 238, 139, 60, 57, 235, 213, 159, 198, 160, 50, 97, 201, 253, 242, 240, 77, 102, 12, 183, 235, 243, 247, 75, 90, 13, 236, 56, 133, 150, 128, 138, 190, 140, 13, 213, 18, 7, 117, 255, 45, 69, 214, 179, 50, 28, 66, 123, 239, 190, 73, 142, 218, 253, 5, 212, 174, 152, 75, 226, 226, 172, 78, 35, 93, 250, 238, 19, 32, 247, 223, 89, 123, 86, 138, 150, 146, 214, 192, 93, 152, 156, 211, 67, 51, 195, 165, 66, 10, 10, 31, 1, 198, 234, 135, 34, 128, 208, 200, 213, 169, 238, 74, 221, 208, 104, 170, 166, 36, 76, 177, 196, 3, 141, 167, 127, 56, 177, 203, 45, 107, 46, 82, 217, 139, 168, 45, 198, 6, 43, 11, 57, 88, 182, 84, 189, 29, 35, 143, 138, 171
+};
+public byte CalcChecksum(IEnumerable&lt;byte&gt; data) {
+    return (byte)password_array[data.Sum(b =&gt; (int)b) & 0xFF];
+}</code></pre></div>
+<div id='pw-C++' class='tabcontent pw-c' style='display:none;'><pre><code>const uint8_t password_array[256] = {
+    35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231, 16, 220, 99, 61, 25, 203, 203, 155, 107, 30, 92, 144, 218, 194, 226, 88, 196, 190, 67, 195, 159, 185, 209, 24, 163, 65, 25, 172, 126, 63, 224, 61, 160, 80, 125, 91, 239, 144, 25, 141, 183, 204, 171, 188, 255, 162, 104, 225, 186, 91, 232, 3, 100, 208, 49, 211, 37, 192, 20, 99, 27, 92, 147, 152, 86, 177, 53, 153, 94, 177, 200, 33, 175, 195, 15, 228, 247, 18, 244, 150, 165, 229, 212, 96, 84, 200, 168, 191, 38, 112, 171, 116, 121, 186, 147, 203, 30, 118, 115, 159, 238, 139, 60, 57, 235, 213, 159, 198, 160, 50, 97, 201, 253, 242, 240, 77, 102, 12, 183, 235, 243, 247, 75, 90, 13, 236, 56, 133, 150, 128, 138, 190, 140, 13, 213, 18, 7, 117, 255, 45, 69, 214, 179, 50, 28, 66, 123, 239, 190, 73, 142, 218, 253, 5, 212, 174, 152, 75, 226, 226, 172, 78, 35, 93, 250, 238, 19, 32, 247, 223, 89, 123, 86, 138, 150, 146, 214, 192, 93, 152, 156, 211, 67, 51, 195, 165, 66, 10, 10, 31, 1, 198, 234, 135, 34, 128, 208, 200, 213, 169, 238, 74, 221, 208, 104, 170, 166, 36, 76, 177, 196, 3, 141, 167, 127, 56, 177, 203, 45, 107, 46, 82, 217, 139, 168, 45, 198, 6, 43, 11, 57, 88, 182, 84, 189, 29, 35, 143, 138, 171
+};
+uint8_t calcChecksum(const std::vector&lt;uint8_t&gt;& data) {
+    int sum = 0; for(auto b : data) sum += b;
+    return password_array[sum & 0xFF];
+}</code></pre></div>
+<div id='pw-Java' class='tabcontent pw-c' style='display:none;'><pre><code>final int[] passArray = {
+    35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231, 16, 220, 99, 61, 25, 203, 203, 155, 107, 30, 92, 144, 218, 194, 226, 88, 196, 190, 67, 195, 159, 185, 209, 24, 163, 65, 25, 172, 126, 63, 224, 61, 160, 80, 125, 91, 239, 144, 25, 141, 183, 204, 171, 188, 255, 162, 104, 225, 186, 91, 232, 3, 100, 208, 49, 211, 37, 192, 20, 99, 27, 92, 147, 152, 86, 177, 53, 153, 94, 177, 200, 33, 175, 195, 15, 228, 247, 18, 244, 150, 165, 229, 212, 96, 84, 200, 168, 191, 38, 112, 171, 116, 121, 186, 147, 203, 30, 118, 115, 159, 238, 139, 60, 57, 235, 213, 159, 198, 160, 50, 97, 201, 253, 242, 240, 77, 102, 12, 183, 235, 243, 247, 75, 90, 13, 236, 56, 133, 150, 128, 138, 190, 140, 13, 213, 18, 7, 117, 255, 45, 69, 214, 179, 50, 28, 66, 123, 239, 190, 73, 142, 218, 253, 5, 212, 174, 152, 75, 226, 226, 172, 78, 35, 93, 250, 238, 19, 32, 247, 223, 89, 123, 86, 138, 150, 146, 214, 192, 93, 152, 156, 211, 67, 51, 195, 165, 66, 10, 10, 31, 1, 198, 234, 135, 34, 128, 208, 200, 213, 169, 238, 74, 221, 208, 104, 170, 166, 36, 76, 177, 196, 3, 141, 167, 127, 56, 177, 203, 45, 107, 46, 82, 217, 139, 168, 45, 198, 6, 43, 11, 57, 88, 182, 84, 189, 29, 35, 143, 138, 171
+};
+public byte calcChecksum(byte[] data) {
+    int sum = 0; for(byte b : data) sum += (b & 0xFF);
+    return (byte) passArray[sum & 0xFF];
+}</code></pre></div>
+<div id='pw-C' class='tabcontent pw-c' style='display:none;'><pre><code>const uint8_t password_array[256] = {
+    35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231, 16, 220, 99, 61, 25, 203, 203, 155, 107, 30, 92, 144, 218, 194, 226, 88, 196, 190, 67, 195, 159, 185, 209, 24, 163, 65, 25, 172, 126, 63, 224, 61, 160, 80, 125, 91, 239, 144, 25, 141, 183, 204, 171, 188, 255, 162, 104, 225, 186, 91, 232, 3, 100, 208, 49, 211, 37, 192, 20, 99, 27, 92, 147, 152, 86, 177, 53, 153, 94, 177, 200, 33, 175, 195, 15, 228, 247, 18, 244, 150, 165, 229, 212, 96, 84, 200, 168, 191, 38, 112, 171, 116, 121, 186, 147, 203, 30, 118, 115, 159, 238, 139, 60, 57, 235, 213, 159, 198, 160, 50, 97, 201, 253, 242, 240, 77, 102, 12, 183, 235, 243, 247, 75, 90, 13, 236, 56, 133, 150, 128, 138, 190, 140, 13, 213, 18, 7, 117, 255, 45, 69, 214, 179, 50, 28, 66, 123, 239, 190, 73, 142, 218, 253, 5, 212, 174, 152, 75, 226, 226, 172, 78, 35, 93, 250, 238, 19, 32, 247, 223, 89, 123, 86, 138, 150, 146, 214, 192, 93, 152, 156, 211, 67, 51, 195, 165, 66, 10, 10, 31, 1, 198, 234, 135, 34, 128, 208, 200, 213, 169, 238, 74, 221, 208, 104, 170, 166, 36, 76, 177, 196, 3, 141, 167, 127, 56, 177, 203, 45, 107, 46, 82, 217, 139, 168, 45, 198, 6, 43, 11, 57, 88, 182, 84, 189, 29, 35, 143, 138, 171
+};
+uint8_t calc_checksum(uint8_t* data, size_t len) {
+    int sum = 0;
+    for(size_t i=0; i&lt;len; i++) sum += data[i];
+    return password_array[sum & 0xFF];
+}</code></pre></div>
+</div>
+<h2>2. Generating Packets</h2>
+<div class='desc'>The Evil Eye topology maps an array of dictionaries representing 4 walls, 11 LEDs each. You must construct a strictly 132-byte frame layout. Each pixel requires 3 bytes spaced to accommodate hardware shift registers mathematically, iterating channel offset `channel - 1` alongside physical indexes.</div>
+<div class='tab-group'>
+<div class='tabs'>
+<button class='gen-l active' onclick="openTab(event, 'gen-Python', 'gen')">Python</button>
+<button class='gen-l ' onclick="openTab(event, 'gen-C#', 'gen')">C#</button>
+<button class='gen-l ' onclick="openTab(event, 'gen-C++', 'gen')">C++</button>
+<button class='gen-l ' onclick="openTab(event, 'gen-Java', 'gen')">Java</button>
+<button class='gen-l ' onclick="openTab(event, 'gen-C', 'gen')">C</button>
+</div>
+<div id='gen-Python' class='tabcontent gen-c' style='display:block;'><pre><code>def gen_frame(leds):
+    frame = bytearray(132)
+    for (ch, led), (r, g, b) in leds.items():
+        idx = ch - 1
+        frame[led * 12 + idx] = g
+        frame[led * 12 + 4 + idx] = r
+        frame[led * 12 + 8 + idx] = b
+    return frame</code></pre></div>
+<div id='gen-C#' class='tabcontent gen-c' style='display:none;'><pre><code>public byte[] GenFrame(int ch, int led, byte r, byte g, byte b) {
+    byte[] frame = new byte[132];
+    int idx = ch - 1;
+    frame[led * 12 + idx] = g;
+    frame[led * 12 + 4 + idx] = r;
+    frame[led * 12 + 8 + idx] = b;
+    return frame;
+}</code></pre></div>
+<div id='gen-C++' class='tabcontent gen-c' style='display:none;'><pre><code>std::vector&lt;uint8_t&gt; genFrame(int ch, int led, uint8_t r, uint8_t g, uint8_t b) {
+    std::vector&lt;uint8_t&gt; frame(132, 0);
+    int idx = ch - 1;
+    frame[led * 12 + idx] = g;
+    frame[led * 12 + 4 + idx] = r;
+    frame[led * 12 + 8 + idx] = b;
+    return frame;
+}</code></pre></div>
+<div id='gen-Java' class='tabcontent gen-c' style='display:none;'><pre><code>public byte[] genFrame(int ch, int led, byte r, byte g, byte b) {
+    byte[] frame = new byte[132];
+    int idx = ch - 1;
+    frame[led * 12 + idx] = g;
+    frame[led * 12 + 4 + idx] = r;
+    frame[led * 12 + 8 + idx] = b;
+    return frame;
+}</code></pre></div>
+<div id='gen-C' class='tabcontent gen-c' style='display:none;'><pre><code>void gen_frame(uint8_t* frame, int ch, int led, uint8_t r, uint8_t g, uint8_t b) {
+    // Assumption: frame is pre-allocated strictly to 132 bytes via calloc
+    int idx = ch - 1;
+    frame[led * 12 + idx] = g;
+    frame[led * 12 + 4 + idx] = r;
+    frame[led * 12 + 8 + idx] = b;
+}</code></pre></div>
+</div>
+<h2>3. Sending Network Frames</h2>
+<div class='desc'>Streaming data to Port 4626 mandates precisely four sequenced datagram packets: (1) Start Frame 0x3344, (2) Layout Init 0xFFF0, (3) Frame Data 0x8877, (4) Execution 0x5566. <b>CRITICAL:</b> Hardware physically requires 8-millisecond mechanical buffering intervals. If 8ms sleep execution delays are bypassed, the network commands discard and screens freeze.</div>
+<div class='tab-group'>
+<div class='tabs'>
+<button class='snd-l active' onclick="openTab(event, 'snd-Python', 'snd')">Python</button>
+<button class='snd-l ' onclick="openTab(event, 'snd-C#', 'snd')">C#</button>
+<button class='snd-l ' onclick="openTab(event, 'snd-C++', 'snd')">C++</button>
+<button class='snd-l ' onclick="openTab(event, 'snd-Java', 'snd')">Java</button>
+<button class='snd-l ' onclick="openTab(event, 'snd-C', 'snd')">C</button>
+</div>
+<div id='snd-Python' class='tabcontent snd-c' style='display:block;'><pre><code>import socket, time
+def send(ip, frame):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(build_start(), (ip, 4626))
+    time.sleep(0.008) # 8ms block
+    sock.sendto(build_init(), (ip, 4626))
+    time.sleep(0.008)
+    sock.sendto(build_data(frame), (ip, 4626))
+    time.sleep(0.008)
+    sock.sendto(build_end(), (ip, 4626))</code></pre></div>
+<div id='snd-C#' class='tabcontent snd-c' style='display:none;'><pre><code>using System.Net.Sockets; using System.Threading;
+public void Send(string ip, byte[] frame) {
+    using (UdpClient udp = new UdpClient()) {
+        udp.Send(sPkt, sPkt.Length, ip, 4626); Thread.Sleep(8);
+        udp.Send(iPkt, iPkt.Length, ip, 4626); Thread.Sleep(8);
+        udp.Send(dPkt, dPkt.Length, ip, 4626); Thread.Sleep(8);
+        udp.Send(ePkt, ePkt.Length, ip, 4626);
+    }
+}</code></pre></div>
+<div id='snd-C++' class='tabcontent snd-c' style='display:none;'><pre><code>#include &lt;winsock2.h&gt;
+#include &lt;thread&gt;
+void send(const char* ip) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(4626); addr.sin_addr.s_addr = inet_addr(ip);
+    sendto(s, sPkt, sizeof(sPkt), 0, (sockaddr*)&addr, sizeof(addr));
+    std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    // ... repeat
+}</code></pre></div>
+<div id='snd-Java' class='tabcontent snd-c' style='display:none;'><pre><code>import java.net.*;
+public void send(String ip) throws Exception {
+    DatagramSocket s = new DatagramSocket();
+    InetAddress addr = InetAddress.getByName(ip);
+    s.send(new DatagramPacket(sPkt, sPkt.length, addr, 4626));
+    Thread.sleep(8);
+    // ... repeat
+}</code></pre></div>
+<div id='snd-C' class='tabcontent snd-c' style='display:none;'><pre><code>#include &lt;sys/socket.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;unistd.h&gt;
+void send_data(const char* ip) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(4626); addr.sin_addr.s_addr = inet_addr(ip);
+    sendto(s, sPkt, sizeof(sPkt), 0, (struct sockaddr*)&addr, sizeof(addr));
+    usleep(8000); // 8000 microseconds = 8ms delay
+    // ... repeat
+}</code></pre></div>
+</div>
+<h2>4. Reading Button Data</h2>
+<div class='desc'>On port 7800, events map dynamically internally via UDP. Evil Eye payloads comprise exactly 687 bytes targeting offsets mapped statically into blocks of 171 channels. Evaluating hex block indicators identifies state: 0xCC (Trigger Pressed), 0x10 (Circuit Disconnected).</div>
+<div class='tab-group'>
+<div class='tabs'>
+<button class='rcv-l active' onclick="openTab(event, 'rcv-Python', 'rcv')">Python</button>
+<button class='rcv-l ' onclick="openTab(event, 'rcv-C#', 'rcv')">C#</button>
+<button class='rcv-l ' onclick="openTab(event, 'rcv-C++', 'rcv')">C++</button>
+<button class='rcv-l ' onclick="openTab(event, 'rcv-Java', 'rcv')">Java</button>
+<button class='rcv-l ' onclick="openTab(event, 'rcv-C', 'rcv')">C</button>
+</div>
+<div id='rcv-Python' class='tabcontent rcv-c' style='display:block;'><pre><code>def listen():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 7800))
+    while True:
+        data, _ = sock.recvfrom(1024)
+        if len(data) == 687 and data[0] == 0x88:
+            for ch in range(1, 5):
+                base = 2 + (ch - 1) * 171
+                for led in range(11):
+                    if data[base + 1 + led] == 0xCC: print(f"Wall {ch}, Button {led} PRESSED")</code></pre></div>
+<div id='rcv-C#' class='tabcontent rcv-c' style='display:none;'><pre><code>public void Listen() {
+    using (UdpClient listener = new UdpClient(7800)) {
+        IPEndPoint ep = new IPEndPoint(IPAddress.Any, 7800);
+        while (true) {
+            byte[] data = listener.Receive(ref ep);
+            if (data.Length == 687 && data[0] == 0x88) {
+                // Iteratively evaluate structural 171-offset block
+            }
+        }
+    }
+}</code></pre></div>
+<div id='rcv-C++' class='tabcontent rcv-c' style='display:none;'><pre><code>void listen() {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(7800); addr.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (sockaddr*)&addr, sizeof(addr));
+    char buf[1024];
+    while(true) {
+        int b = recvfrom(s, buf, sizeof(buf), 0, nullptr, nullptr);
+        if(b == 687 && buf[0] == (char)0x88) { /* Decode state hex offsets */ }
+    }
+}</code></pre></div>
+<div id='rcv-Java' class='tabcontent rcv-c' style='display:none;'><pre><code>public void listen() throws Exception {
+    DatagramSocket s = new DatagramSocket(7800);
+    byte[] buf = new byte[1024];
+    while (true) {
+        DatagramPacket p = new DatagramPacket(buf, buf.length);
+        s.receive(p);
+        if (p.getLength() == 687 && buf[0] == (byte)0x88) { /* Decode */ }
+    }
+}</code></pre></div>
+<div id='rcv-C' class='tabcontent rcv-c' style='display:none;'><pre><code>void listen_triggers() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(7800); addr.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr*)&addr, sizeof(addr));
+    char buf[1024];
+    while(1) {
+        int bytes = recvfrom(s, buf, sizeof(buf), 0, NULL, NULL);
+        if(bytes == 687 && buf[0] == (char)0x88) { /* Block iterator search for 0xCC */ }
+    }
+}</code></pre></div>
+</div>
+<h2>5. Hardware Behaviors & Timeouts</h2><p><b>Timeout Behavior & Physical States:</b> Both configurations implicitly track an internal 3.0-second physical reset cycle loop limit timeout parameter directly hard-programmed onto PCB firmware chips.<br><br><b>Sending Data:</b> To circumvent graphical dropout, visualizer endpoints must proactively and indefinitely fire continuous redundant UDP datagram sweeps toward `4626`.<br><b>Receiving Triggers:</b> Since interaction event states mirror outbound buffer execution constraints mathematically via the 3-second cycle, physical devices remain inactive regarding hardware triggers (`0xCC / 7800 UDP`) whenever the corresponding controller instance freezes or otherwise stops transmitting outbound matrix packets entirely.</p><h2>6. Multi-Threading Principles</h2>
+<div class='desc'><b>Crucial Setup Instructions:</b> Socket IO `recv()` functions aggressively block main code execution entirely. Similarly, the 8-millisecond delay cascades UI rendering performance if grouped on the main GUI framework instance. Thus, permanently running independent backend daemon threads for both Input (Listening) and Output (Sending) cycles simultaneously is categorically standard.</div>
+<div class='tab-group'>
+<div class='tabs'>
+<button class='thr-l active' onclick="openTab(event, 'thr-Python', 'thr')">Python</button>
+<button class='thr-l ' onclick="openTab(event, 'thr-C#', 'thr')">C#</button>
+<button class='thr-l ' onclick="openTab(event, 'thr-C++', 'thr')">C++</button>
+<button class='thr-l ' onclick="openTab(event, 'thr-Java', 'thr')">Java</button>
+<button class='thr-l ' onclick="openTab(event, 'thr-C', 'thr')">C</button>
+</div>
+<div id='thr-Python' class='tabcontent thr-c' style='display:block;'><pre><code>import threading
+
+def run_system():
+    # Sender isolates 4-packet synchronous blocks with internal .sleep() requirements
+    threading.Thread(target=send_loop, daemon=True).start()
+    
+    # Receiver completely divorces port 7800 blocking UDP scrape
+    threading.Thread(target=listen_loop, daemon=True).start()
+    
+    main_gui.mainloop() # Protected rendering thread runtime</code></pre></div>
+<div id='thr-C#' class='tabcontent thr-c' style='display:none;'><pre><code>using System.Threading.Tasks;
+
+public void RunSystem() {
+    // Utilize built in .NET scalable background thread pools
+    Task.Run(() =&gt; SendLoop());
+    Task.Run(() =&gt; ListenLoop());
+    
+    Application.Run(new MainWindow()); // Exists cleanly on isolated context
+}</code></pre></div>
+<div id='thr-C++' class='tabcontent thr-c' style='display:none;'><pre><code>#include &lt;thread&gt;
+
+void startSystem() {
+    // Asynchronous thread initialization executing permanently
+    std::thread senderWorker(sendLoop);
+    std::thread receiverWorker(listenLoop);
+    
+    // Detach releases context execution completely maintaining background permanence
+    senderWorker.detach();
+    receiverWorker.detach();
+    
+    runGUI();
+}</code></pre></div>
+<div id='thr-Java' class='tabcontent thr-c' style='display:none;'><pre><code>public void runSystem() {
+    // Standard Java threaded runtime implementations
+    new Thread(() -&gt; sendLoop()).start();
+    new Thread(() -&gt; listenLoop()).start();
+    
+    launchJavaFXGUI();
+}</code></pre></div>
+<div id='thr-C' class='tabcontent thr-c' style='display:none;'><pre><code>#include &lt;pthread.h&gt;
+
+void start_system() {
+    pthread_t send_thread, recv_thread;
+    
+    // Explicit low-level pthread assignments targeting void* casting functions
+    pthread_create(&send_thread, NULL, send_loop, NULL);
+    pthread_create(&recv_thread, NULL, listen_loop, NULL);
+    
+    // Non-blocking background detach states
+    pthread_detach(send_thread);
+    pthread_detach(recv_thread);
+    
+    start_gui_loop();
+}</code></pre></div>
+</div>
+
+</body>
+</html>
