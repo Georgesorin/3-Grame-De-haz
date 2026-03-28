@@ -16,6 +16,44 @@ import os, sys, random, threading, time, math
 import tkinter as tk
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
+
+try:
+    import pygame as _pygame
+except ImportError:
+    _pygame = None
+
+RULES_MP3 = os.path.join(_DIR, "sounds", "rules.mp3")
+REITERATE_MP3 = os.path.join(_DIR, "sounds", "reiterate.mp3")
+WON_MP3 = os.path.join(_DIR, "sounds", "won.mp3")
+
+
+def _play_music_blocking(path, stop_event_callable):
+    """
+    Block until the given mp3 finishes or stop_event_callable() is true.
+    Safe to call from a worker thread. No-op if pygame or file is missing.
+    """
+    if _pygame is None:
+        return
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        if not _pygame.mixer.get_init():
+            _pygame.mixer.init()
+    except Exception:
+        return
+    try:
+        _pygame.mixer.music.load(path)
+        _pygame.mixer.music.play()
+        while _pygame.mixer.music.get_busy():
+            if stop_event_callable():
+                _pygame.mixer.music.stop()
+                break
+            _pygame.time.wait(80)
+    except Exception:
+        try:
+            _pygame.mixer.music.stop()
+        except Exception:
+            pass
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
@@ -48,7 +86,7 @@ BUTTON_SLOTS = list(range(1, 11))  # 5 lit + 5 off per wall; colors only on lit 
 AUTO_REFRESH_SEC = {"easy": 10.0, "medium": 6, "hard": 5.0}
 MIN_REFRESH_SEC = 3
 RAMP_DEC = 0.2
-WIN_SCORE = 15
+WIN_SCORE = 20
 
 # Base wall maps (2-team 1-wall variant built dynamically)
 WALL_MAP = {
@@ -72,6 +110,39 @@ PALETTE_5 = [
 ]
 PALETTE_NAMES = ["RED", "GREEN", "BLUE", "YELLOW", "MAGENTA"]
 PALETTE_HEX   = ["#ff0000", "#00ff00", "#0078ff", "#ffc800", "#c800ff"]
+
+
+def _palette_sound_path(pal_idx):
+    if pal_idx < 0 or pal_idx >= len(PALETTE_NAMES):
+        return ""
+    name = PALETTE_NAMES[pal_idx]
+    stem = "PURPLE" if name == "MAGENTA" else name
+    return os.path.join(_DIR, "sounds", f"{stem}.mp3")
+
+
+def _play_palette_sound_blocking(pal_idx, stop_event_callable):
+    """Play one color clip from sounds/; block until finished or stop_event_callable()."""
+    if _pygame is None:
+        return
+    path = _palette_sound_path(pal_idx)
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        if not _pygame.mixer.get_init():
+            _pygame.mixer.init()
+        snd = _pygame.mixer.Sound(path)
+        ch = _pygame.mixer.find_channel(True)
+        if ch is None:
+            ch = _pygame.mixer.Channel(0)
+        ch.play(snd)
+        while ch.get_busy():
+            if stop_event_callable():
+                ch.stop()
+                return
+            _pygame.time.wait(30)
+    except Exception:
+        pass
+
 
 RED   = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -302,11 +373,50 @@ class ColorRushGame:
             for w in self._walls(t):
                 self._svc.set_led(w, EYE_LED, r // 4, g // 4, b // 4)
 
+    def _preface_audio_path(self):
+        """
+        Optional narration before layout (_phase_idx = completed rounds, before increment).
+        rules.mp3 only before round 1; reiterate.mp3 before rounds 11, 21, 31, …
+        """
+        if self._phase_idx == 0:
+            return RULES_MP3
+        if self._phase_idx > 0 and self._phase_idx % 10 == 0:
+            return REITERATE_MP3
+        return None
+
     def _new_round(self, notify_start=False):
         if self._stop.is_set() or self.state != S_PLAY:
             with self._lock:
                 self._round_busy = False
             return
+        preface = self._preface_audio_path()
+        if preface:
+            with self._lock:
+                self._round_busy = True
+            threading.Thread(
+                target=self._preface_then_new_round,
+                args=(notify_start, preface),
+                daemon=True,
+            ).start()
+            return
+        self._new_round_after_rules(notify_start)
+
+    def _preface_then_new_round(self, notify_start, audio_path):
+        _play_music_blocking(audio_path, lambda: self._stop.is_set())
+        if self._stop.is_set() or self.state != S_PLAY:
+            with self._lock:
+                self._round_busy = False
+            return
+        self._new_round_after_rules(notify_start)
+
+    def _new_round_after_rules(self, notify_start=False):
+        if self._stop.is_set() or self.state != S_PLAY:
+            with self._lock:
+                self._round_busy = False
+            return
+        with self._lock:
+            self._round_busy = True
+
         self.must_press_target = (self._phase_idx % 2 == 0)
         self._phase_idx += 1
         self.target_palette_idx = random.randrange(len(PALETTE_5))
@@ -328,6 +438,11 @@ class ColorRushGame:
 
         self._show_eyes()
         ti = self.target_palette_idx
+        _play_palette_sound_blocking(ti, self._stop.is_set)
+        if self._stop.is_set():
+            with self._lock:
+                self._round_busy = False
+            return
         iv = self._interval_for_ramp()
         payload = {
             "target_idx": ti,
@@ -380,6 +495,12 @@ class ColorRushGame:
     def _win_sequence(self, team):
         if self._stop.is_set():
             return
+        music_thr = threading.Thread(
+            target=_play_music_blocking,
+            args=(WON_MP3, lambda: self._stop.is_set()),
+            daemon=True,
+        )
+        music_thr.start()
         walls = self._all_walls()
         tr, tg, tb = TEAM_COLORS_RGB[team]
         try:
@@ -390,6 +511,7 @@ class ColorRushGame:
             time.sleep(0.85)
         except Exception:
             pass
+        music_thr.join()
         if not self._stop.is_set():
             self.stop_game()
 
