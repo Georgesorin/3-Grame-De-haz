@@ -33,7 +33,7 @@ def _song_fallback() -> str:
 
 
 class ScoreboardApp:
-    def __init__(self) -> None:
+    def __init__(self, master=None) -> None:
         self._last: dict | None = None
         self.sock: socket.socket | None = None
         self._bind_error: str | None = None
@@ -47,7 +47,10 @@ class ScoreboardApp:
         except OSError as e:
             self._bind_error = str(e)
 
-        self.root = tk.Tk()
+        if master is None:
+            self.root = tk.Tk()
+        else:
+            self.root = tk.Toplevel(master)
         self.root.title("Piano Tiles — Scoreboard (UDP)")
         self.root.configure(bg="#12121a")
         self.root.minsize(440, 280)
