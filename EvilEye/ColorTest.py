@@ -1,17 +1,3 @@
-"""
-Color Rush – Evil Eye LED hardware.
-
-Each wall lights exactly five buttons (one color each) and leaves five dark.
-A target palette color is chosen each round. Rounds alternate:
-  • Press round — first press on the target color scores.
-  • Avoid round — first press on any other *lit* color scores; target is forbidden.
-Auto-refresh uses a deadline that resets to the full interval on each correct score.
-The interval shortens a little after every layout change (timer or score round).
-First team to 20 points wins and ends the game.
-
-Run:  python ColorTest.py
-"""
-
 import os, sys, random, threading, time, math
 import tkinter as tk
 
@@ -598,6 +584,9 @@ class ColorRushApp(tk.Tk):
         recv = int(self._cfg.get("receiver_port", 7800))
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
+        vif = (self._cfg.get("virtual_iface_ip") or "").strip()
+        if vif:
+            self._service.set_bind_ip(vif)
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
         self._service.start_receiver()
         self._service.start_polling()
@@ -1045,6 +1034,9 @@ class ColorRushApp(tk.Tk):
             self._service.stop_receiver()
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
+        vif = (self._cfg.get("virtual_iface_ip") or "").strip() or "0.0.0.0"
+        if vif != self._service._bind_ip:
+            self._service.set_bind_ip(vif)
         if recv != prev_recv:
             self._service.start_receiver()
         self._set_status(f"{ip}:{udp}  ·  listen {recv}")
@@ -1105,4 +1097,8 @@ class ColorRushApp(tk.Tk):
 
 
 if __name__ == "__main__":
+    if os.environ.get("EVILEYE_SKIP_DISCOVERY", "").lower() not in ("1", "true", "yes"):
+        from evil_eye_network_setup import run_startup_discovery_and_save_config
+
+        run_startup_discovery_and_save_config()
     ColorRushApp().mainloop()
