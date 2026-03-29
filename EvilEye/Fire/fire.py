@@ -102,6 +102,7 @@ def _make_frame(led_states):
 # ─────────────────────────────────────────────────────────────────────────────
 _BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 _SOUNDS_DIR = os.path.join(_BASE_DIR, "sounds")
+_RULES_MP3  = os.path.join(_SOUNDS_DIR, "rules.mp3")
 _BOOM       = os.path.join(_BASE_DIR, "_boom.wav")
 _FAIL       = os.path.join(_BASE_DIR, "_fail.wav")
 
@@ -343,6 +344,25 @@ _EYE = 0
 _PCOL     = {1:(255,80,0), 2:(0,120,255), 3:(200,0,200), 4:(0,200,80)}
 _PCOL_HEX = {k:"#%02x%02x%02x"%v for k,v in _PCOL.items()}
 
+def _is_junk_sound_filename(word):
+    """True for auto-generated / download-site clip names we should not show in UI or log."""
+    if not word:
+        return False
+    w = word.lower()
+    return "ttsmp3.com" in w or "voicetext_" in w
+
+
+def _word_for_display(word):
+    if _is_junk_sound_filename(word):
+        return "· listen ·"
+    return word
+
+
+def _word_for_log(word):
+    if _is_junk_sound_filename(word):
+        return "audio cue"
+    return word
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Game
 # ─────────────────────────────────────────────────────────────────────────────
@@ -511,8 +531,12 @@ class FireGame:
         self._all_off()
         self._no_fire_streak = 0
 
-        # Countdown – play one random sound from GO/ folder
-        go_sounds = list(_SOUND_FILES.get('GO', []))
+        # Optional rules clip (must use absolute path — MCI cwd is not this script's folder)
+        if os.path.isfile(_RULES_MP3):
+            _play_mp3_blocking(os.path.abspath(_RULES_MP3))
+
+        # Countdown – one random clip from sounds/ready/
+        go_sounds = list(_SOUND_FILES.get('ready', []))
         if go_sounds:
             self._set_eyes(255, 165, 0)
             self._flush()
@@ -525,6 +549,7 @@ class FireGame:
                 self._flush()
                 self._tts.speak(str(n), vary=False)
                 self._all_off()
+            self._tts.speak("Go!", vary=False)
 
         _wait_interruptible(PRE_GAME_PAUSE, self)
         if not self._running:
@@ -668,102 +693,177 @@ class FireGameUI:
     def __init__(self, root):
         self.root     = root
         self.root.title("FIRE! – Reaction Game")
-        self.root.configure(bg="#111")
-        self.root.minsize(640, 540)
+        self.root.configure(bg="#0d0d0d")
+        self.root.minsize(640, 480)
         self.game     = None
         self._running = False
+        self._score_lbl = {}
+        self._scores_win = None
         self._build_ui()
+        self._build_scores_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
         # ── Top bar ──────────────────────────────────────────────────────────
-        top = tk.Frame(self.root, bg="#1e1e1e", pady=8)
+        top = tk.Frame(self.root, bg="#1a1a1a", pady=10, padx=0)
         top.pack(fill=tk.X)
         tk.Label(top, text="FIRE! Reaction Game",
-                 bg="#1e1e1e", fg="#ff4400",
-                 font=("Consolas",15,"bold")).pack(side=tk.LEFT, padx=12)
+                 bg="#1a1a1a", fg="#ff6600",
+                 font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT, padx=(16, 8))
         self._lbl_status = tk.Label(top, text="IDLE",
-                                    bg="#1e1e1e", fg="#555",
-                                    font=("Consolas",11,"bold"))
-        self._lbl_status.pack(side=tk.RIGHT, padx=12)
+                                    bg="#1a1a1a", fg="#666666",
+                                    font=("Segoe UI", 11, "bold"))
+        self._lbl_status.pack(side=tk.RIGHT, padx=(8, 16))
 
-        # ── Config ───────────────────────────────────────────────────────────
-        cfg = tk.Frame(self.root, bg="#161616", pady=8)
-        cfg.pack(fill=tk.X, padx=10)
+        # ── Config (aligned grid) ─────────────────────────────────────────────
+        cfg_outer = tk.Frame(self.root, bg="#0d0d0d", padx=16, pady=12)
+        cfg_outer.pack(fill=tk.X)
+        cfg = tk.Frame(cfg_outer, bg="#141414", highlightbackground="#2a2a2a",
+                       highlightthickness=1, padx=12, pady=10)
+        cfg.pack(fill=tk.X)
 
         def lbl(t):
-            return tk.Label(cfg, text=t, bg="#161616", fg="#888",
-                            font=("Consolas",9))
+            return tk.Label(cfg, text=t, bg="#141414", fg="#9a9a9a",
+                            font=("Segoe UI", 9))
 
-        lbl("Device IP:").grid(row=0, column=0, padx=(4,2))
         self._ip_var = tk.StringVar(value="255.255.255.255")
-        tk.Entry(cfg, textvariable=self._ip_var, width=17,
-                 bg="#0a0a0a", fg="#00ff00", insertbackground="white",
-                 font=("Consolas",9)).grid(row=0, column=1, padx=4)
-
-        lbl("Rounds:").grid(row=0, column=2, padx=(14,2))
         self._rounds_var = tk.IntVar(value=10)
-        tk.Spinbox(cfg, from_=2, to=99, textvariable=self._rounds_var,
-                   width=4, bg="#0a0a0a", fg="#00ff00",
-                   font=("Consolas",9)).grid(row=0, column=3, padx=4)
-
-        lbl("Players:").grid(row=0, column=4, padx=(14,4))
         self._pvar = {}
-        for i, p in enumerate([1,2,3,4]):
+
+        lbl("Device IP").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        ip_e = tk.Entry(cfg, textvariable=self._ip_var, width=18,
+                        bg="#0a0a0a", fg="#33dd66", insertbackground="#cccccc",
+                        relief="flat", highlightthickness=1,
+                        highlightbackground="#2a6633", highlightcolor="#33aa44",
+                        font=("Consolas", 10))
+        ip_e.grid(row=1, column=0, sticky="w", padx=(0, 20), pady=(0, 8))
+
+        lbl("Rounds").grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
+        tk.Spinbox(cfg, from_=2, to=99, textvariable=self._rounds_var,
+                   width=5, bg="#0a0a0a", fg="#33dd66",
+                   buttonbackground="#333", font=("Consolas", 10),
+                   highlightthickness=0).grid(row=1, column=1, sticky="w",
+                                              padx=(0, 24), pady=(0, 8))
+
+        lbl("Players").grid(row=0, column=2, sticky="w", pady=(0, 4))
+        pfrm = tk.Frame(cfg, bg="#141414")
+        pfrm.grid(row=1, column=2, rowspan=1, sticky="w", pady=(0, 8))
+        for p in (1, 2, 3, 4):
             v = tk.BooleanVar(value=True)
             self._pvar[p] = v
-            tk.Checkbutton(cfg, text=f"P{p}", variable=v,
-                           bg="#161616", fg=_PCOL_HEX[p],
-                           selectcolor="#333", activebackground="#161616",
-                           font=("Consolas",9,"bold")
-                           ).grid(row=0, column=5+i, padx=2)
+            tk.Checkbutton(
+                pfrm, text=f"P{p}", variable=v,
+                bg="#141414", fg=_PCOL_HEX[p],
+                selectcolor="#252525", activebackground="#141414",
+                activeforeground=_PCOL_HEX[p],
+                font=("Segoe UI", 9, "bold"),
+            ).pack(side=tk.LEFT, padx=(0, 10))
 
-        # ── Score board ──────────────────────────────────────────────────────
-        sb = tk.Frame(self.root, bg="#111")
-        sb.pack(fill=tk.X, padx=10, pady=4)
-        self._round_lbl = tk.Label(sb, text="Round: –",
-                                   bg="#111", fg="#555",
-                                   font=("Consolas",10))
-        self._round_lbl.pack(side=tk.LEFT, padx=8)
-        self._score_lbl = {}
-        for p in [1,2,3,4]:
-            f = tk.Frame(sb, bg="#111")
-            f.pack(side=tk.LEFT, padx=14)
-            tk.Label(f, text=f"Player {p}", bg="#111",
-                     fg=_PCOL_HEX[p],
-                     font=("Consolas",9,"bold")).pack()
-            s = tk.Label(f, text="0", bg="#111", fg="white",
-                         font=("Consolas",22,"bold"))
-            s.pack()
+        cfg.columnconfigure(0, weight=0)
+        cfg.columnconfigure(1, weight=0)
+        cfg.columnconfigure(2, weight=1)
+
+        # ── Main play area ────────────────────────────────────────────────────
+        play = tk.Frame(self.root, bg="#0d0d0d")
+        play.pack(fill=tk.BOTH, expand=True, pady=(16, 8))
+        self._lbl_word = tk.Label(play, text="",
+                                  bg="#0d0d0d", fg="#f0f0f0",
+                                  font=("Segoe UI", 40, "bold"))
+        self._lbl_word.pack(pady=(8, 4))
+
+        self._lbl_eye = tk.Label(play, text="",
+                                 bg="#0d0d0d", fg="#ff3333",
+                                 font=("Segoe UI", 15, "bold"))
+        self._lbl_eye.pack(pady=(0, 12))
+
+        self._btn = tk.Button(
+            play, text="START GAME",
+            command=self._toggle,
+            bg="#1e5c2e", fg="#ffffff",
+            activebackground="#267a3a", activeforeground="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat", padx=28, pady=10, cursor="hand2",
+        )
+        self._btn.pack(pady=(8, 20))
+
+        # ── Log ────────────────────────────────────────────────────────────────
+        log_frame = tk.Frame(self.root, bg="#0d0d0d")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        tk.Label(log_frame, text="Log", bg="#0d0d0d", fg="#666",
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 4))
+        self._log = scrolledtext.ScrolledText(
+            log_frame, bg="#080808", fg="#22bb55",
+            font=("Consolas", 9), state="disabled",
+            height=8, borderwidth=0, highlightthickness=1,
+            highlightbackground="#222", insertbackground="#ccc",
+        )
+        self._log.pack(fill=tk.BOTH, expand=True)
+
+    def _build_scores_window(self):
+        w = tk.Toplevel(self.root)
+        w.title("FIRE! – Scores")
+        w.configure(bg="#111111")
+        w.minsize(340, 140)
+        w.transient(self.root)
+
+        def place_scores_window():
+            self.root.update_idletasks()
+            try:
+                rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+                rw = self.root.winfo_width()
+                w.geometry(f"+{rx + rw + 12}+{ry}")
+            except tk.TclError:
+                pass
+
+        place_scores_window()
+
+        hdr = tk.Frame(w, bg="#1a1a1a", pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="Scores", bg="#1a1a1a", fg="#ff8800",
+                 font=("Segoe UI", 12, "bold")).pack()
+
+        body = tk.Frame(w, bg="#111111", padx=16, pady=14)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        self._score_lbl.clear()
+        for p in (1, 2, 3, 4):
+            col = tk.Frame(body, bg="#111111")
+            col.pack(side=tk.LEFT, padx=(0, 18), expand=True, fill=tk.BOTH)
+            tk.Label(col, text=f"Player {p}", bg="#111111",
+                     fg=_PCOL_HEX[p], font=("Segoe UI", 9, "bold")).pack()
+            s = tk.Label(col, text="0", bg="#111111", fg="#f5f5f5",
+                         font=("Segoe UI", 28, "bold"))
+            s.pack(pady=(4, 0))
             self._score_lbl[p] = s
 
-        # ── Word display ─────────────────────────────────────────────────────
-        self._lbl_word = tk.Label(self.root, text="",
-                                  bg="#111", fg="#fff",
-                                  font=("Consolas",52,"bold"))
-        self._lbl_word.pack(pady=4)
+        def on_scores_close():
+            w.withdraw()
 
-        self._lbl_eye = tk.Label(self.root, text="",
-                                 bg="#111", fg="#ff0000",
-                                 font=("Consolas",17,"bold"))
-        self._lbl_eye.pack()
+        w.protocol("WM_DELETE_WINDOW", on_scores_close)
+        self._scores_win = w
 
-        # ── Start / Stop ─────────────────────────────────────────────────────
-        self._btn = tk.Button(self.root, text="START GAME",
-                              command=self._toggle,
-                              bg="#1a4a1a", fg="white",
-                              font=("Consolas",12,"bold"),
-                              relief="flat", padx=20, pady=8)
-        self._btn.pack(pady=8)
+    def _scores_deiconify(self):
+        if self._scores_win is not None:
+            try:
+                self.root.update_idletasks()
+                rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+                rw = self.root.winfo_width()
+                self._scores_win.geometry(f"+{rx + rw + 12}+{ry}")
+                self._scores_win.deiconify()
+                self._scores_win.lift()
+            except tk.TclError:
+                pass
 
-        # ── Log ──────────────────────────────────────────────────────────────
-        self._log = scrolledtext.ScrolledText(
-            self.root, bg="#0a0a0a", fg="#00aa00",
-            font=("Consolas",8), state="disabled",
-            height=7, borderwidth=0)
-        self._log.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+    def _apply_scores(self, sc):
+        for p, lbl in list(self._score_lbl.items()):
+            try:
+                lbl.config(text=str(sc.get(p, 0)))
+            except tk.TclError:
+                pass
 
     def _log_msg(self, msg):
+        if msg and "ttsmp3.com" in msg.lower():
+            return
         ts = datetime.now().strftime("%H:%M:%S")
         self._log.configure(state="normal")
         self._log.insert(tk.END, f"[{ts}] {msg}\n")
@@ -785,10 +885,10 @@ class FireGameUI:
             self._log_msg("Select at least one player!")
             return
         self._running = True
-        self._btn.config(text="STOP", bg="#4a1a1a")
-        self._set_status("PLAYING", "#00ff44")
-        for lbl in self._score_lbl.values():
-            lbl.config(text="0")
+        self._scores_deiconify()
+        self._btn.config(text="STOP", bg="#8b2a2a", activebackground="#a83333")
+        self._set_status("PLAYING", "#33ee66")
+        self._apply_scores({1: 0, 2: 0, 3: 0, 4: 0})
         self._lbl_word.config(text="", fg="white")
         self._lbl_eye.config(text="")
         self.game = FireGame(
@@ -806,8 +906,8 @@ class FireGameUI:
         if self.game:
             self.game.stop()
         self._running = False
-        self._btn.config(text="START GAME", bg="#1a4a1a")
-        self._set_status("STOPPED", "#555")
+        self._btn.config(text="START GAME", bg="#1e5c2e", activebackground="#267a3a")
+        self._set_status("STOPPED", "#666666")
         self._lbl_word.config(text="")
         self._lbl_eye.config(text="")
 
@@ -820,29 +920,29 @@ class FireGameUI:
 
         elif event == "round_start":
             rn, tot = kw["round_num"], kw["total"]
-            self._round_lbl.config(text=f"Round: {rn} / {tot}")
-            self._lbl_word.config(text="", fg="white")
+            self._lbl_word.config(text="", fg="#f0f0f0")
             self._lbl_eye.config(text="")
-            self._set_status(f"Round {rn}/{tot}", "#00cc00")
+            self._set_status(f"Round {rn} / {tot}", "#44dd77")
             self._log_msg(f"── Round {rn}/{tot} ──")
 
         elif event == "word":
             word, is_f, fcol = kw["word"], kw["is_fire"], kw.get("fire_color")
+            show = _word_for_display(word)
+            logw = _word_for_log(word)
             if is_f:
-                self._lbl_word.config(text=word, fg="#ff2200")
+                self._lbl_word.config(text=show, fg="#ff4422")
                 if fcol == 'red':
-                    self._lbl_eye.config(text="[ RED – PRESS! ]",   fg="#ff0000")
+                    self._lbl_eye.config(text="[ RED – PRESS! ]", fg="#ff3333")
                 else:
-                    self._lbl_eye.config(text="[ GREEN – DON'T! ]", fg="#00ff00")
+                    self._lbl_eye.config(text="[ GREEN – DON'T! ]", fg="#33ff66")
             else:
-                self._lbl_word.config(text=word, fg="#ffffff")
+                self._lbl_word.config(text=show, fg="#f0f0f0")
                 self._lbl_eye.config(text="")
-            self._log_msg(f"  {word}" + (f" [{fcol.upper()} EYE]" if is_f else ""))
+            self._log_msg(f"  {logw}" + (f" [{fcol.upper()} EYE]" if is_f else ""))
 
         elif event == "round_win":
             w, sc = kw["winner"], kw["scores"]
-            for p, lbl in self._score_lbl.items():
-                lbl.config(text=str(sc[p]))
+            self._apply_scores(sc)
             self._set_status(f"Player {w} survives!", _PCOL_HEX[w])
             self._lbl_eye.config(text=f"Player {w} survives!", fg=_PCOL_HEX[w])
             self._log_msg(f"BOOM  Player {w} survives! | {sc}")
@@ -859,22 +959,20 @@ class FireGameUI:
 
         elif event == "wrong_press":
             p, sc = kw["player"], kw.get("scores", {})
-            for pid, lbl in self._score_lbl.items():
-                lbl.config(text=str(sc.get(pid, 0)))
+            self._apply_scores(sc)
             self._lbl_eye.config(text=f"Player {p}: WRONG! -1", fg="#ff0055")
             self._log_msg(f"  WRONG PRESS – Player {p} → {sc.get(p, '?')}")
 
         elif event == "stopped":
             self._running = False
-            self._btn.config(text="START GAME", bg="#1a4a1a")
-            self._set_status("STOPPED", "#555")
+            self._btn.config(text="START GAME", bg="#1e5c2e", activebackground="#267a3a")
+            self._set_status("STOPPED", "#666666")
 
         elif event == "game_over":
             sc, w = kw["scores"], kw["winner"]
             self._running = False
-            self._btn.config(text="START GAME", bg="#1a4a1a")
-            for p, lbl in self._score_lbl.items():
-                lbl.config(text=str(sc.get(p, 0)))
+            self._btn.config(text="START GAME", bg="#1e5c2e", activebackground="#267a3a")
+            self._apply_scores(sc)
             self._set_status(f"GAME OVER – Player {w} wins!", _PCOL_HEX[w])
             self._lbl_word.config(text=f"Player {w} wins!", fg=_PCOL_HEX[w])
             self._lbl_eye.config(text="")
@@ -883,6 +981,11 @@ class FireGameUI:
     def _on_close(self):
         if self.game:
             self.game.stop()
+        try:
+            if self._scores_win is not None:
+                self._scores_win.destroy()
+        except tk.TclError:
+            pass
         self.root.destroy()
 
 
