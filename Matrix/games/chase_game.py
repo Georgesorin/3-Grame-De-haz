@@ -22,7 +22,7 @@ CHASE_PLAYER         = (0,   245, 220)
 CHASE_PLAYER_SHIELD  = (70,  190, 255)
 CHASE_ENEMY_HEAD     = (255, 50,  50)
 CHASE_ENEMY_BODY     = (180, 20,  30)
-CHASE_PU_FREEZE      = (255, 130, 0)
+CHASE_PU_FREEZE      = (0, 0, 80)
 CHASE_PU_SLOW        = (255, 140, 60)
 CHASE_PU_SHIELD      = (255, 255, 140)
 BLACK                = (0,   0,   0)
@@ -810,31 +810,19 @@ class ChaseGame:
                     self._hud_msg   = f"P{player_id+1} lovit! -{lost} comori"
                     self._hud_until = now + 1.5
                     self.on_game_event("hit", {"player": player_id, "lives": p["lives"]})
-                    # Spawn a small island at death position + one random extra island
+                    # Rerandomize all islands — death island is guaranteed, rest are fresh
                     dx0, dy0 = death_pos
                     death_island = frozenset(
                         (ix, iy)
                         for ix in range(max(0, dx0-1), min(BOARD_WIDTH,  dx0+2))
                         for iy in range(max(0, dy0-1), min(BOARD_HEIGHT, dy0+2))
                     )
+                    self._random_islands(
+                        num_blobs=random.randint(4, 7),
+                        min_cells=3, max_cells=7,
+                    )
                     self._islands |= death_island
-                    # Random extra small blob away from death spot
-                    extra_tries = 0
-                    while extra_tries < 30:
-                        extra_tries += 1
-                        ecx = random.randint(2, BOARD_WIDTH - 3)
-                        ecy = random.randint(2, BOARD_HEIGHT - 5)
-                        if abs(ecx - dx0) + abs(ecy - dy0) < 6:
-                            continue
-                        blob = {(ecx, ecy)}
-                        cur  = (ecx, ecy)
-                        for _ in range(random.randint(2, 4)):
-                            nx2, ny2 = cur[0] + random.choice([-1,0,1]), cur[1] + random.choice([-1,0,1])
-                            if 0 <= nx2 < BOARD_WIDTH and 0 <= ny2 < BOARD_HEIGHT:
-                                blob.add((nx2, ny2))
-                                cur = (nx2, ny2)
-                        self._islands |= blob
-                        break
+                    self._islands |= _HOME_ISLAND
                     self._rebuild_shoal()
                     # Respawn snakes so they don't get stuck on new islands
                     self._snakes = []
@@ -924,7 +912,7 @@ class ChaseGame:
                 freq = 2.0 + (3.0 - remaining) * (8.0 / 3.0)
                 show = int(now * freq * 2) % 2 == 0
             if show:
-                edge = (255, 130, 0)
+                edge = CHASE_PU_FREEZE
                 for x in range(BOARD_WIDTH):
                     frame[(x, 0)]              = edge
                     frame[(x, BOARD_HEIGHT-1)] = edge
