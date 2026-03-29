@@ -164,10 +164,11 @@ def read_song_title_from_chart(path: str) -> str:
     return ""
 
 
-def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
+def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str, str]]:
     """Resolve songs from piano_tiles_chart.json (manifest or legacy single chart).
 
-    Returns list of (absolute_chart_path, display_title). Paths in manifest are
+    Returns list of (absolute_chart_path, display_title, absolute_music_path).
+    music_path is an empty string if not specified. Paths in manifest are
     relative to the catalog file's directory.
     """
     catalog_path = os.path.abspath(catalog_path)
@@ -182,7 +183,7 @@ def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
 
     songs = data.get("songs")
     if isinstance(songs, list) and songs:
-        out: List[Tuple[str, str]] = []
+        out: List[Tuple[str, str, str]] = []
         for item in songs:
             if not isinstance(item, dict):
                 continue
@@ -205,7 +206,12 @@ def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
                 title = read_song_title_from_chart(chart_path)
             if not title:
                 title = os.path.basename(chart_path)
-            out.append((chart_path, title.strip()))
+            music_path = ""
+            mrel = item.get("music") or item.get("audio") or item.get("mp3")
+            if isinstance(mrel, str) and mrel.strip():
+                mrel = mrel.strip().replace("\\", "/")
+                music_path = mrel if os.path.isabs(mrel) else os.path.normpath(os.path.join(base_dir, mrel))
+            out.append((chart_path, title.strip(), music_path))
         return out
 
     if isinstance(data.get("tiles"), list):
@@ -213,7 +219,7 @@ def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
         if not title:
             sn = data.get("songName")
             title = sn.strip() if isinstance(sn, str) and sn.strip() else os.path.basename(catalog_path)
-        return [(catalog_path, title)]
+        return [(catalog_path, title, "")]
 
     return []
 
@@ -1074,7 +1080,7 @@ def main() -> None:
         player_labels = [f"{n} player{'s' if n != 1 else ''}" for n in range(1, NUM_PLAYER_SLOTS + 1)]
         pi = terminal_menu_select("Number of players", player_labels)
         num_players = pi + 1
-        song_labels = [t for _, t in song_entries]
+        song_labels = [t for _, t, _ in song_entries]
         si = terminal_menu_select("Song", song_labels)
         selected_chart = song_entries[si][0]
     except KeyboardInterrupt:
@@ -1089,8 +1095,10 @@ def main() -> None:
     game.state = "LOBBY"
     game.start_game(num_players)
     pygame.mixer.init()
-    pygame.mixer.music.load("./song_charts/test.mp3")
-    pygame.mixer.music.play()
+    music_path = song_entries[si][2]
+    if music_path and os.path.isfile(music_path):
+        pygame.mixer.music.load(music_path)
+        pygame.mixer.music.play()
     print(f"Started with {game.num_players} player(s).")
 
     net = NetworkManager(game)
