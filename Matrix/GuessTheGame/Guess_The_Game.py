@@ -5,7 +5,6 @@ import os
 import random
 import re
 import socket
-import sys
 import threading
 import time
 import tkinter as tk
@@ -68,10 +67,26 @@ GRAY = (55, 55, 55)
 GRAY_BRIGHT = (90, 90, 90)
 SPLIT_LINE = (120, 120, 140)
 DRAW_INK = (255, 255, 255)
+# First/last inner rows: color pickers (below top border y=0, above bottom border y=31).
+PALETTE_ROW_TOP = 1
+PALETTE_ROW_BOTTOM = 30
+# Eight swatches × 2 columns across full width x=0..15 (flush with side margins).
+PALETTE_COLORS: List[Tuple[int, int, int]] = [
+    (255, 45, 45),
+    (45, 255, 65),
+    (55, 110, 255),
+    (255, 220, 55),
+    (230, 55, 255),
+    (55, 240, 255),
+    (255, 140, 40),
+    (255, 255, 255),
+]
 RESET_MARKER_RED = (255, 0, 0)
-# 2×2 touch targets inside the drawable area (not on the gray border).
-RESET_TOPLEFT_CELLS = frozenset({(1, 2), (2, 2), (1, 3), (2, 3)})
-RESET_BOTTOMRIGHT_CELLS = frozenset({(13, 28), (14, 28), (13, 29), (14, 29)})
+# 2×2 touch targets: same vertical “slots” as before (mid mat / mid each half), flush right (x=13–14).
+# 2 players: one reset clears the whole canvas. 4 players: top / bottom halves each have a reset.
+RESET_2P_CELLS = frozenset({(13, 15), (14, 15), (13, 16), (14, 16)})
+RESET_4P_TOP_CELLS = frozenset({(13, 7), (14, 7), (13, 8), (14, 8)})
+RESET_4P_BOTTOM_CELLS = frozenset({(13, 22), (14, 22), (13, 23), (14, 23)})
 
 
 def led_ch_index_to_board_xy(ch: int, led_idx: int) -> Tuple[int, int]:
@@ -110,6 +125,15 @@ def normalize_guess(s: str) -> str:
     return s
 
 
+def _center_window_on_screen(win: tk.Misc, width: int, height: int) -> None:
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    x = max(0, (sw - width) // 2)
+    y = max(0, (sh - height) // 2)
+    win.geometry(f"{width}x{height}+{x}+{y}")
+
+
 class GuessTheGame:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -127,6 +151,8 @@ class GuessTheGame:
         self.potential_award = [ROUND_START, ROUND_START]
         self.active_guess_team: Optional[int] = None
         self.canvas: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
+        self.team_draw_colors: List[Tuple[int, int, int]] = [DRAW_INK, DRAW_INK]
+        self._prev_pressed_xy: Set[Tuple[int, int]] = set()
         self._last_scoreboard_broadcast = 0.0
         self._reset_corner_prev: Dict[str, bool] = {"tl": False, "br": False}
 
@@ -149,6 +175,7 @@ class GuessTheGame:
         self.potential_award[0] = ROUND_START
         self.potential_award[1] = ROUND_START
         self.canvas.clear()
+        self._prev_pressed_xy = set(self.pressed_xy)
 
     def start_game(self, count: int) -> None:
         with self.lock:
@@ -164,6 +191,36 @@ class GuessTheGame:
                 return
             self._next_word()
             self.active_guess_team = None
+
+    def set_manual_draw_word(self, raw: str) -> str:
+        """Host sets the word shown to drawers; clears the mat. Not allowed while a guess is armed."""
+        text = (raw or "").strip()
+        if not text:
+            return "Type a word, then Send."
+        with self.lock:
+            if self.state != "PLAYING":
+                return "Press Start in the Keyboard window first."
+            if self.active_guess_team is not None:
+                return "A team is guessing — submit a guess with Enter/Send or type unlock in the console."
+            self.current_word = text
+            self.canvas.clear()
+            self._prev_pressed_xy = set(self.pressed_xy)
+        return "Word sent to drawers."
+
+    def gui_clear_canvas(self, half: Optional[str] = None) -> None:
+        """Clear drawing from the GUI. half: 'top' | 'bottom' for 4p; ignored for 2p (full clear)."""
+        with self.lock:
+            if self.state != "PLAYING":
+                return
+            if self.num_players == 2:
+                self.canvas.clear()
+            elif half == "top":
+                x0, x1, y0, y1 = self._drawable_bounds("top")
+                self._clear_canvas_in_bounds(x0, x1, y0, y1)
+            elif half == "bottom":
+                x0, x1, y0, y1 = self._drawable_bounds("bottom")
+                self._clear_canvas_in_bounds(x0, x1, y0, y1)
+            self._prev_pressed_xy = set(self.pressed_xy)
 
     def arm_guess(self, team: int) -> None:
         team = 1 if team == 1 else 2
@@ -237,7 +294,7 @@ class GuessTheGame:
         """Returns x0, x1, y0, y1 inclusive. For 2 players, `side` is ignored (full inner mat).
 
         For 4 players the mat is split horizontally: Team 1 draws on top, Team 2 on bottom,
-        with two divider rows in the middle (not drawable).
+        with two divider rows in the middle (y=15–16, not drawable).
         """
         if self.num_players == 2:
             return 1, 14, 2, 29
@@ -256,13 +313,17 @@ class GuessTheGame:
                 del self.canvas[k]
 
     def _process_reset_corners(self) -> None:
-        """Rising-edge press on red 2×2 markers clears that side’s drawing (or all in 2-player)."""
+        """Rising-edge press on red 2×2 markers (right side) clears drawing (full mat in 2p; top/bottom in 4p)."""
         if self.state != "PLAYING":
             self._reset_corner_prev = {"tl": False, "br": False}
             return
 
-        tl_now = self._zone_fired(self.pressed_xy, RESET_TOPLEFT_CELLS)
-        br_now = self._zone_fired(self.pressed_xy, RESET_BOTTOMRIGHT_CELLS)
+        if self.num_players == 2:
+            tl_now = self._zone_fired(self.pressed_xy, RESET_2P_CELLS)
+            br_now = False
+        else:
+            tl_now = self._zone_fired(self.pressed_xy, RESET_4P_TOP_CELLS)
+            br_now = self._zone_fired(self.pressed_xy, RESET_4P_BOTTOM_CELLS)
 
         if not self.drawing_allowed():
             self._reset_corner_prev["tl"] = tl_now
@@ -275,38 +336,76 @@ class GuessTheGame:
             else:
                 tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
                 self._clear_canvas_in_bounds(tx0, tx1, ty0, ty1)
+            self._prev_pressed_xy = set(self.pressed_xy)
 
         if self.num_players >= 4 and br_now and not self._reset_corner_prev["br"]:
             bx0, bx1, by0, by1 = self._drawable_bounds("bottom")
             self._clear_canvas_in_bounds(bx0, bx1, by0, by1)
+            self._prev_pressed_xy = set(self.pressed_xy)
 
         self._reset_corner_prev["tl"] = tl_now
         self._reset_corner_prev["br"] = br_now
 
     def _is_reset_marker_cell(self, x: int, y: int) -> bool:
-        if (x, y) in RESET_TOPLEFT_CELLS:
-            return True
-        if self.num_players >= 4 and (x, y) in RESET_BOTTOMRIGHT_CELLS:
-            return True
-        return False
+        if self.num_players == 2:
+            return (x, y) in RESET_2P_CELLS
+        return (x, y) in RESET_4P_TOP_CELLS or (x, y) in RESET_4P_BOTTOM_CELLS
+
+    def _paint_forbidden_row(self, y: int) -> bool:
+        return y in (PALETTE_ROW_TOP, PALETTE_ROW_BOTTOM)
+
+    def _cell_allows_paint(self, x: int, y: int) -> bool:
+        if self._is_reset_marker_cell(x, y):
+            return False
+        if self._paint_forbidden_row(y):
+            return False
+        if self.num_players == 2:
+            x0, x1, y0, y1 = self._drawable_bounds("top")
+            return x0 <= x <= x1 and y0 <= y <= y1
+        tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
+        bx0, bx1, by0, by1 = self._drawable_bounds("bottom")
+        return (tx0 <= x <= tx1 and ty0 <= y <= ty1) or (bx0 <= x <= bx1 and by0 <= y <= by1)
+
+    def _team_index_for_stroke(self, x: int, y: int) -> int:
+        if self.num_players == 4:
+            tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
+            if tx0 <= x <= tx1 and ty0 <= y <= ty1:
+                return 0
+            return 1
+        return 0 if y <= 15 else 1
+
+    @staticmethod
+    def _palette_color_index(x: int) -> int:
+        if x < 0 or x >= BOARD_WIDTH:
+            return 0
+        return min(x // 2, len(PALETTE_COLORS) - 1)
+
+    def _paint_palette_rows(self, buffer: bytearray) -> None:
+        for x in range(BOARD_WIDTH):
+            rgb = PALETTE_COLORS[self._palette_color_index(x)]
+            self.set_led(buffer, x, PALETTE_ROW_TOP, rgb)
+            self.set_led(buffer, x, PALETTE_ROW_BOTTOM, rgb)
 
     def _apply_drawing(self) -> None:
         if not self.drawing_allowed() or self.state != "PLAYING":
+            self._prev_pressed_xy = set(self.pressed_xy)
             return
-        for x, y in self.pressed_xy:
-            if self._is_reset_marker_cell(x, y):
+        rising = self.pressed_xy - self._prev_pressed_xy
+        for x, y in rising:
+            if y == PALETTE_ROW_TOP and 0 <= x < BOARD_WIDTH:
+                self.team_draw_colors[0] = PALETTE_COLORS[self._palette_color_index(x)]
                 continue
-            if self.num_players == 2:
-                x0, x1, y0, y1 = self._drawable_bounds("top")
-                if x0 <= x <= x1 and y0 <= y <= y1:
-                    self.canvas[(x, y)] = DRAW_INK
+            if self.num_players >= 2 and y == PALETTE_ROW_BOTTOM and 0 <= x < BOARD_WIDTH:
+                self.team_draw_colors[1] = PALETTE_COLORS[self._palette_color_index(x)]
+                continue
+            if not self._cell_allows_paint(x, y):
+                continue
+            if (x, y) in self.canvas:
+                del self.canvas[(x, y)]
             else:
-                tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
-                bx0, bx1, by0, by1 = self._drawable_bounds("bottom")
-                if tx0 <= x <= tx1 and ty0 <= y <= ty1:
-                    self.canvas[(x, y)] = DRAW_INK
-                elif bx0 <= x <= bx1 and by0 <= y <= by1:
-                    self.canvas[(x, y)] = DRAW_INK
+                ti = self._team_index_for_stroke(x, y)
+                self.canvas[(x, y)] = self.team_draw_colors[ti]
+        self._prev_pressed_xy = set(self.pressed_xy)
 
     def set_led(self, buffer: bytearray, x: int, y: int, color: Tuple[int, int, int]) -> None:
         if x < 0 or x >= 16 or y < 0 or y >= 32:
@@ -351,15 +450,20 @@ class GuessTheGame:
                 self.set_led(buffer, 0, y, GRAY)
                 self.set_led(buffer, 15, y, GRAY)
 
+            self._paint_palette_rows(buffer)
+
             if self.num_players == 4:
                 for x in range(1, 15):
                     self.set_led(buffer, x, 15, SPLIT_LINE)
                     self.set_led(buffer, x, 16, SPLIT_LINE)
 
-            for x, y in RESET_TOPLEFT_CELLS:
-                self.set_led(buffer, x, y, RESET_MARKER_RED)
-            if self.num_players >= 4:
-                for x, y in RESET_BOTTOMRIGHT_CELLS:
+            if self.num_players == 2:
+                for x, y in RESET_2P_CELLS:
+                    self.set_led(buffer, x, y, RESET_MARKER_RED)
+            else:
+                for x, y in RESET_4P_TOP_CELLS:
+                    self.set_led(buffer, x, y, RESET_MARKER_RED)
+                for x, y in RESET_4P_BOTTOM_CELLS:
                     self.set_led(buffer, x, y, RESET_MARKER_RED)
 
         return buffer
@@ -552,118 +656,410 @@ class DualUI:
         root.title("GuessTheGame")
         root.withdraw()
 
-        word_font = tkfont.Font(size=52, weight="bold")
-        small = tkfont.Font(size=12)
-        hdr_font = tkfont.Font(size=14, weight="bold")
+        word_font = tkfont.Font(family="Segoe UI", size=52, weight="bold")
+        small = tkfont.Font(family="Segoe UI", size=11)
+        hdr_font = tkfont.Font(family="Segoe UI", size=13, weight="bold")
+        self._font_ui = tkfont.Font(family="Segoe UI", size=10)
+        self._font_ui_sm = tkfont.Font(family="Segoe UI", size=9)
+        self._font_section = tkfont.Font(family="Segoe UI", size=10, weight="bold")
 
         self.win_word = tk.Toplevel(root)
         self.win_word.title("GuessTheGame — Word (for drawers)")
-        self.win_word.geometry("720x380+80+80")
+        self.win_word.minsize(560, 360)
         self.win_word.configure(bg="#0d1117")
 
+        w_bg = "#0d1117"
+        w_outer = tk.Frame(self.win_word, bg=w_bg)
+        w_outer.pack(fill=tk.BOTH, expand=True)
+        for i in (0, 2):
+            w_outer.rowconfigure(i, weight=1)
+            w_outer.columnconfigure(i, weight=1)
+        w_inner = tk.Frame(w_outer, bg=w_bg)
+        w_inner.grid(row=1, column=1, sticky="")
+
         tk.Label(
-            self.win_word,
+            w_inner,
             text="Draw this word on the mat:",
             font=small,
             fg="#8b949e",
-            bg="#0d1117",
-        ).pack(pady=(24, 8))
+            bg=w_bg,
+        ).pack(pady=(8, 10))
 
         self.lbl_word = tk.Label(
-            self.win_word,
+            w_inner,
             text="—",
             font=word_font,
             fg="#58a6ff",
-            bg="#0d1117",
-            wraplength=680,
+            bg=w_bg,
+            wraplength=640,
+            justify=tk.CENTER,
         )
-        self.lbl_word.pack(expand=True)
+        self.lbl_word.pack(pady=(4, 8))
 
         tk.Label(
-            self.win_word,
-            text="Step on the red to clear your canvas",
+            w_inner,
+            text="Top/bottom rows: pick team color. Tap a lit tile again to erase. Red squares on the right clear drawing.",
             font=small,
             fg="#f85149",
-            bg="#0d1117",
-            wraplength=680,
+            bg=w_bg,
+            wraplength=640,
+            justify=tk.CENTER,
         ).pack(pady=(8, 4))
 
         self.lbl_word_guess_alert = tk.Label(
-            self.win_word,
+            w_inner,
             text="",
             font=small,
             fg="#f85149",
-            bg="#0d1117",
-            wraplength=680,
+            bg=w_bg,
+            wraplength=640,
+            justify=tk.CENTER,
         )
         self.lbl_word_guess_alert.pack(pady=(4, 8))
 
-        tk.Label(self.win_word, text="Scores", font=hdr_font, fg="#8b949e", bg="#0d1117").pack(pady=(8, 4))
-        self.lbl_word_scores = tk.Label(self.win_word, text="", font=small, fg="#c9d1d9", bg="#0d1117")
-        self.lbl_word_scores.pack(pady=(0, 20))
+        tk.Label(w_inner, text="Scores", font=hdr_font, fg="#8b949e", bg=w_bg).pack(pady=(8, 4))
+        self.lbl_word_scores = tk.Label(w_inner, text="", font=small, fg="#c9d1d9", bg=w_bg, justify=tk.CENTER)
+        self.lbl_word_scores.pack(pady=(0, 16))
+
+        # Keyboard / host window — GitHub-style dark panels
+        KEY_BG = "#0d1117"
+        KEY_MAIN = "#161b22"
+        KEY_CARD = "#21262d"
+        KEY_BORDER = "#30363d"
+        KEY_MUTED = "#8b949e"
+        KEY_TEXT = "#c9d1d9"
+        KEY_WARN = "#d29922"
+        KEY_DIS_FG = "#8b949e"  # keep disabled controls readable on Windows dark UIs
 
         self.win_key = tk.Toplevel(root)
         self.win_key.title("GuessTheGame — Keyboard")
-        self.win_key.geometry("520x420+100+440")
-        self.win_key.configure(bg="#161b22")
+        self.win_key.minsize(680, 540)
+        self.win_key.configure(bg=KEY_BG)
+
+        key_outer = tk.Frame(self.win_key, bg=KEY_BG)
+        key_outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        for i in (0, 2):
+            key_outer.rowconfigure(i, weight=1)
+            key_outer.columnconfigure(i, weight=1)
+        key_mid = tk.Frame(key_outer, bg=KEY_BG)
+        key_mid.grid(row=1, column=1, sticky="")
+
+        row_ui = tk.Frame(key_mid, bg=KEY_BG)
+        row_ui.pack()
+
+        main_k = tk.Frame(row_ui, bg=KEY_MAIN, highlightbackground=KEY_BORDER, highlightthickness=1)
+        main_k.pack(side=tk.LEFT, padx=(0, 12))
+
+        inner = tk.Frame(main_k, bg=KEY_MAIN)
+        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=18)
 
         tk.Label(
-            self.win_key,
-            text="Guessers: press your team button, type the word, then Enter (keyboard or button).",
-            font=small,
-            fg="#c9d1d9",
-            bg="#161b22",
+            inner,
+            text="Keyboard & host",
+            font=hdr_font,
+            fg="#f0f6fc",
+            bg=KEY_MAIN,
+            anchor=tk.CENTER,
+        ).pack(fill=tk.X, pady=(0, 4))
+        tk.Label(
+            inner,
+            text="Guessing, manual word, and mat controls",
+            font=self._font_ui_sm,
+            fg=KEY_MUTED,
+            bg=KEY_MAIN,
+            anchor=tk.CENTER,
+        ).pack(fill=tk.X, pady=(0, 16))
+
+        setup_card = tk.Frame(inner, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1, padx=14, pady=12)
+        setup_card.pack(fill=tk.X, pady=(0, 14))
+        tk.Label(setup_card, text="SETUP", font=self._font_section, fg=KEY_MUTED, bg=KEY_CARD, anchor=tk.CENTER).pack(
+            fill=tk.X, pady=(0, 8)
+        )
+
+        start_wrap = tk.Frame(setup_card, bg=KEY_CARD)
+        start_wrap.pack()
+        start_row = tk.Frame(start_wrap, bg=KEY_CARD)
+        start_row.pack()
+        self.var_players = tk.IntVar(value=2)
+        rb_kw = {
+            "bg": KEY_CARD,
+            "fg": KEY_TEXT,
+            "selectcolor": "#484f58",
+            "activebackground": KEY_CARD,
+            "font": self._font_ui,
+            "highlightthickness": 0,
+        }
+        self.rb_2p = tk.Radiobutton(start_row, text="2 players", variable=self.var_players, value=2, **rb_kw)
+        self.rb_2p.pack(side=tk.LEFT, padx=(0, 20))
+        self.rb_4p = tk.Radiobutton(start_row, text="4 players", variable=self.var_players, value=4, **rb_kw)
+        self.rb_4p.pack(side=tk.LEFT, padx=(0, 24))
+        self.btn_start = tk.Button(
+            start_row,
+            text="Start game",
+            font=self._font_ui,
+            command=self._ui_start_game,
+            bg="#238636",
+            fg="#ffffff",
+            activebackground="#2ea043",
+            activeforeground="#ffffff",
+            disabledforeground=KEY_DIS_FG,
+            relief=tk.FLAT,
+            bd=0,
+            padx=20,
+            pady=10,
+            cursor="hand2",
+        )
+        self.btn_start.pack(side=tk.LEFT)
+
+        tk.Label(
+            inner,
+            text="Enter — submit a guess (arm Team 1 or 2 first).\n"
+            "Send word — puts what you typed on the drawer screen (no team armed).\n"
+            "Skip word — new random word and clear the mat.",
+            font=self._font_ui_sm,
+            fg=KEY_MUTED,
+            bg=KEY_MAIN,
+            justify=tk.CENTER,
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        status_frame = tk.Frame(inner, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1)
+        status_frame.pack(fill=tk.X, pady=(0, 16))
+        self.status = tk.Label(
+            status_frame,
+            text="Choose player count, then Start game.",
+            font=self._font_ui,
+            fg=KEY_WARN,
+            bg=KEY_CARD,
+            anchor=tk.CENTER,
+            justify=tk.CENTER,
+            padx=14,
+            pady=12,
             wraplength=480,
-        ).pack(pady=(16, 8))
+        )
+        self.status.pack(fill=tk.X)
 
-        self.status = tk.Label(self.win_key, text="", font=small, fg="#f0883e", bg="#161b22")
-        self.status.pack(pady=(0, 12))
-
-        team_row = tk.Frame(self.win_key, bg="#161b22")
-        team_row.pack(pady=4)
+        tk.Label(inner, text="Choose the team to guess", font=self._font_section, fg=KEY_MUTED, bg=KEY_MAIN, anchor=tk.CENTER).pack(
+            fill=tk.X, pady=(0, 8)
+        )
+        team_wrap = tk.Frame(inner, bg=KEY_MAIN)
+        team_wrap.pack(pady=(0, 10))
+        team_row = tk.Frame(team_wrap, bg=KEY_MAIN)
+        team_row.pack()
+        btn_team_kw = dict(
+            font=self._font_ui,
+            relief=tk.FLAT,
+            bd=0,
+            padx=18,
+            pady=10,
+            cursor="hand2",
+            activeforeground="#ffffff",
+            disabledforeground=KEY_DIS_FG,
+        )
         self.btn_guess_t1 = tk.Button(
             team_row,
-            text="Guess Team 1",
-            width=14,
+            text="Team 1",
             command=lambda: self._arm(1),
             bg="#238636",
-            fg="white",
+            fg="#ffffff",
             activebackground="#2ea043",
+            **btn_team_kw,
         )
-        self.btn_guess_t1.pack(side=tk.LEFT, padx=6)
+        self.btn_guess_t1.pack(side=tk.LEFT, padx=(0, 10))
         self.btn_guess_t2 = tk.Button(
             team_row,
-            text="Guess Team 2",
-            width=14,
+            text="Team 2",
             command=lambda: self._arm(2),
             bg="#1f6feb",
-            fg="white",
+            fg="#ffffff",
             activebackground="#388bfd",
+            **btn_team_kw,
         )
         self._sync_team2_button_visibility()
 
-        self.entry = tk.Entry(self.win_key, font=("Segoe UI", 18), width=28, bg="#0d1117", fg="#f0f6fc", insertbackground="white")
-        self.entry.pack(pady=12, ipady=6)
+        tk.Label(inner, text="Word", font=self._font_ui_sm, fg=KEY_MUTED, bg=KEY_MAIN, anchor=tk.CENTER).pack(
+            fill=tk.X, pady=(0, 6)
+        )
+        self.entry = tk.Entry(
+            inner,
+            font=("Segoe UI", 16),
+            bg=KEY_BG,
+            fg="#f0f6fc",
+            insertbackground="#58a6ff",
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=KEY_BORDER,
+            highlightcolor="#58a6ff",
+        )
+        self.entry.pack(fill=tk.X, pady=(0, 12), ipady=10)
         self.entry.bind("<Return>", lambda e: self._submit())
 
-        btn_row = tk.Frame(self.win_key, bg="#161b22")
-        btn_row.pack(pady=8)
-        tk.Button(
+        btn_wrap = tk.Frame(inner, bg=KEY_MAIN)
+        btn_wrap.pack(pady=(0, 18))
+        btn_row = tk.Frame(btn_wrap, bg=KEY_MAIN)
+        btn_row.pack()
+        btn_sec_kw = dict(
+            font=self._font_ui,
+            relief=tk.FLAT,
+            bd=0,
+            padx=16,
+            pady=9,
+            cursor="hand2",
+            bg="#30363d",
+            fg=KEY_TEXT,
+            activebackground="#484f58",
+            activeforeground=KEY_TEXT,
+            disabledforeground=KEY_DIS_FG,
+        )
+        self.btn_enter = tk.Button(btn_row, text="Guess the typed word", width=16, command=self._submit, **btn_sec_kw)
+        self.btn_enter.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_send = tk.Button(
             btn_row,
-            text="Enter",
-            width=10,
-            command=self._submit,
+            text="Send a custom word",
+            width=16,
+            command=self._send_manual_word_ui,
+            **btn_sec_kw,
+        )
+        self.btn_send.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_skip = tk.Button(
+            btn_row,
+            text="Skip word",
+            width=12,
+            command=self._skip_word,
             bg="#21262d",
-            fg="#f0f6fc",
-        ).pack()
+            fg="#db6d28",
+            activebackground="#30363d",
+            activeforeground="#e0823d",
+            disabledforeground=KEY_DIS_FG,
+            font=self._font_ui,
+            relief=tk.FLAT,
+            bd=0,
+            padx=14,
+            pady=9,
+            cursor="hand2",
+        )
+        self.btn_skip.pack(side=tk.LEFT)
 
-        tk.Label(self.win_key, text="Scores", font=hdr_font, fg="#f0f6fc", bg="#161b22").pack(pady=(16, 4))
-        self.lbl_scores = tk.Label(self.win_key, text="", font=small, fg="#c9d1d9", bg="#161b22")
+        scores_card = tk.Frame(inner, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1, padx=14, pady=12)
+        scores_card.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(scores_card, text="SCORES", font=self._font_section, fg=KEY_MUTED, bg=KEY_CARD, anchor=tk.CENTER).pack(
+            fill=tk.X, pady=(0, 6)
+        )
+        self.lbl_scores = tk.Label(
+            scores_card, text="", font=small, fg=KEY_TEXT, bg=KEY_CARD, anchor=tk.CENTER, justify=tk.CENTER
+        )
         self.lbl_scores.pack()
+
+        sep = tk.Frame(row_ui, width=1, bg=KEY_BORDER)
+        sep.pack(side=tk.LEFT, fill=tk.Y, pady=4)
+        sidebar = tk.Frame(row_ui, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1, padx=14, pady=14)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y, pady=4)
+        tk.Label(sidebar, text="MAT", font=self._font_section, fg=KEY_MUTED, bg=KEY_CARD, anchor=tk.CENTER).pack(
+            fill=tk.X, pady=(0, 4)
+        )
+        tk.Label(
+            sidebar,
+            text="Clear drawing\n(same as red pads)",
+            font=self._font_ui_sm,
+            fg=KEY_MUTED,
+            bg=KEY_CARD,
+            justify=tk.CENTER,
+        ).pack(pady=(0, 12))
+        sb_btn_kw = {
+            "width": 12,
+            "font": self._font_ui,
+            "bg": "#30363d",
+            "fg": KEY_TEXT,
+            "activebackground": "#484f58",
+            "activeforeground": KEY_TEXT,
+            "disabledforeground": KEY_DIS_FG,
+            "relief": tk.FLAT,
+            "bd": 0,
+            "padx": 8,
+            "pady": 10,
+            "cursor": "hand2",
+        }
+        self.btn_reset_full = tk.Button(sidebar, text="Clear mat", command=lambda: self._gui_reset(None), **sb_btn_kw)
+        self.btn_reset_top = tk.Button(sidebar, text="Clear top", command=lambda: self._gui_reset("top"), **sb_btn_kw)
+        self.btn_reset_bottom = tk.Button(sidebar, text="Clear bottom", command=lambda: self._gui_reset("bottom"), **sb_btn_kw)
+
+        for w in (self.entry, self.btn_enter, self.btn_send, self.btn_skip, self.btn_guess_t1, self.btn_guess_t2):
+            w.config(state=tk.DISABLED)
+
+        _center_window_on_screen(self.win_word, 720, 420)
+        self.win_word.update_idletasks()
+        kw, kh = 760, 580
+        sw = self.win_key.winfo_screenwidth()
+        sh = self.win_key.winfo_screenheight()
+        kx = max(0, (sw - kw) // 2)
+        ky = self.win_word.winfo_y() + self.win_word.winfo_height() + 12
+        if ky + kh > sh - 32:
+            ky = max(32, sh - kh - 32)
+        self.win_key.geometry(f"{kw}x{kh}+{kx}+{ky}")
 
         self.win_word.protocol("WM_DELETE_WINDOW", self._quit)
         self.win_key.protocol("WM_DELETE_WINDOW", self._quit)
+        self._sync_reset_sidebar()
         self._tick()
+
+    def _ui_start_game(self) -> None:
+        n = int(self.var_players.get())
+        if n not in (2, 4):
+            n = 2
+        self.game.start_game(n)
+        self.status.config(text=f"Game on — {n} players.")
+
+    def _send_manual_word_ui(self) -> None:
+        """Push the typed text to the drawer word (host); does not submit a team guess."""
+        msg = self.game.set_manual_draw_word(self.entry.get())
+        self.entry.delete(0, tk.END)
+        self.status.config(text=msg)
+
+    def _skip_word(self) -> None:
+        with self.game.lock:
+            if self.game.state != "PLAYING":
+                return
+        self.game.new_word_manual()
+        self.status.config(text="Skipped to next word.")
+
+    def _gui_reset(self, half: Optional[str]) -> None:
+        with self.game.lock:
+            playing = self.game.state == "PLAYING"
+            n = self.game.num_players
+        if not playing:
+            self.status.config(text="Start the game first.")
+            return
+        self.game.gui_clear_canvas(half)
+        if n == 2 or half is None:
+            self.status.config(text="Mat cleared.")
+        else:
+            self.status.config(text=f"{half.title()} half cleared.")
+
+    def _sync_reset_sidebar(self) -> None:
+        self.btn_reset_full.pack_forget()
+        self.btn_reset_top.pack_forget()
+        self.btn_reset_bottom.pack_forget()
+        with self.game.lock:
+            playing = self.game.state == "PLAYING"
+            n = self.game.num_players
+        if not playing:
+            return
+        if n == 2:
+            self.btn_reset_full.pack(fill=tk.X, pady=4)
+        else:
+            self.btn_reset_top.pack(fill=tk.X, pady=4)
+            self.btn_reset_bottom.pack(fill=tk.X, pady=4)
+
+    def _sync_start_row(self) -> None:
+        with self.game.lock:
+            playing = self.game.state == "PLAYING"
+        if playing:
+            self.btn_start.config(state=tk.DISABLED)
+            self.rb_2p.config(state=tk.DISABLED)
+            self.rb_4p.config(state=tk.DISABLED)
+        else:
+            self.btn_start.config(state=tk.NORMAL)
+            self.rb_2p.config(state=tk.NORMAL)
+            self.rb_4p.config(state=tk.NORMAL)
 
     def _arm(self, team: int) -> None:
         with self.game.lock:
@@ -674,7 +1070,7 @@ class DualUI:
         self.entry.focus_set()
         self._sync_team2_button_visibility()
         self._sync_guess_buttons()
-        self.status.config(text=f"Team {team} is guessing — type and press Enter.")
+        self.status.config(text=f"Team {team} is guessing — type and press Enter to submit.")
 
     def _sync_team2_button_visibility(self) -> None:
         with self.game.lock:
@@ -690,10 +1086,16 @@ class DualUI:
 
     def _sync_guess_buttons(self) -> None:
         with self.game.lock:
+            playing = self.game.state == "PLAYING"
             armed = self.game.active_guess_team
             two_player = self.game.num_players < 4
+        if not playing:
+            self.btn_guess_t1.config(state=tk.DISABLED)
+            self.btn_guess_t2.config(state=tk.DISABLED)
+            return
         if two_player:
             self.btn_guess_t1.config(state=tk.NORMAL)
+            self.btn_guess_t2.config(state=tk.DISABLED)
             return
         if armed is None:
             self.btn_guess_t1.config(state=tk.NORMAL)
@@ -720,10 +1122,13 @@ class DualUI:
         if not self.root.winfo_exists():
             return
         with self.game.lock:
-            w = self.game.current_word if self.game.state == "PLAYING" else "—"
+            playing = self.game.state == "PLAYING"
+            w = self.game.current_word if playing else "—"
             s1, s2 = self.game.team_scores
             armed = self.game.active_guess_team
-        self.lbl_word.config(text=w.upper() if w != "—" else "Start from console: start 2  or  start 4")
+        self.lbl_word.config(
+            text=w.upper() if w != "—" else "Choose players in Keyboard window, then Start game",
+        )
         if armed is not None:
             self.lbl_word_guess_alert.config(
                 text=f"A team is guessing — stop! (Team {armed})",
@@ -735,86 +1140,16 @@ class DualUI:
         self.lbl_word_scores.config(text=score_line)
         self._sync_team2_button_visibility()
         self._sync_guess_buttons()
+        self._sync_start_row()
+        self._sync_reset_sidebar()
+        st = tk.NORMAL if playing else tk.DISABLED
+        self.entry.config(state=st)
+        self.btn_enter.config(state=st)
+        self.btn_skip.config(state=st)
+        # Manual "Send word" only when no team is guessing; guesses use Enter.
+        send_st = tk.DISABLED if not playing or armed is not None else tk.NORMAL
+        self.btn_send.config(state=send_st)
         self.root.after(120, self._tick)
-
-
-def _read_nav_key() -> str:
-    if sys.platform == "win32":
-        import msvcrt
-
-        while True:
-            c = msvcrt.getch()
-            if c in (b"\r", b"\n"):
-                return "enter"
-            if c == b"\x1b":
-                return "quit"
-            if c in (b"q", b"Q"):
-                return "quit"
-            if c in (b"w", b"W"):
-                return "up"
-            if c in (b"s", b"S"):
-                return "down"
-            if c in (b"\xe0", b"\x00"):
-                c2 = msvcrt.getch()
-                if c2 == b"H":
-                    return "up"
-                if c2 == b"P":
-                    return "down"
-    else:
-        import termios
-        import tty
-
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            while True:
-                ch = sys.stdin.read(1)
-                if ch in "\r\n":
-                    return "enter"
-                if ch in ("q", "Q"):
-                    return "quit"
-                if ch in ("w", "W"):
-                    return "up"
-                if ch in ("s", "S"):
-                    return "down"
-                if ch == "\x1b":
-                    return "quit"
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return "quit"
-
-
-def _print_menu_block(title: str, options: List[str], idx: int) -> int:
-    n = 0
-    print(title)
-    n += 1
-    print("Press : ↑ / ↓  then Enter")
-    n += 1
-    print()
-    n += 1
-    for i, opt in enumerate(options):
-        prefix = " > " if i == idx else "   "
-        print(f"{prefix}{opt}")
-        n += 1
-    return n
-
-
-def terminal_menu_select(title: str, options: List[str]) -> int:
-    if not options:
-        raise ValueError("empty menu")
-    idx = 0
-    while True:
-        _print_menu_block(title, options, idx)
-        key = _read_nav_key()
-        if key == "up":
-            idx = (idx - 1) % len(options)
-        elif key == "down":
-            idx = (idx + 1) % len(options)
-        elif key == "enter":
-            return idx
-        elif key == "quit":
-            raise KeyboardInterrupt
 
 
 def read_command_line(prompt: str) -> str:
@@ -824,22 +1159,10 @@ def read_command_line(prompt: str) -> str:
 def main() -> None:
     print("GuessTheGame — matrix draw + dual-screen guess")
     print(f"UDP recv port {UDP_LISTEN_PORT} (mat input; Simulator fans out to 7801+7802 by default)")
-    print("Commands: start 2 | start 4 | next | scores | unlock | quit")
-    try:
-        pi = terminal_menu_select(
-            "Players",
-            [
-                "2 players (1 mat drawer + 1 keyboard)",
-                "4 players (2 drawers: top/bottom split + 2 keyboard)",
-            ],
-        )
-        num_players = 2 if pi == 0 else 4
-    except KeyboardInterrupt:
-        print("\nCancelled.")
-        return
+    print("Start the round from the Keyboard window (2 / 4 players + Start).")
+    print("Optional console: start 2 | start 4 | next | scores | unlock | quit")
 
     game = GuessTheGame()
-    game.start_game(num_players)
 
     net = NetworkManager(game)
     net.start_bg()
