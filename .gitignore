@@ -1,4 +1,7 @@
 .venv/
 Documentation/
+<<<<<<< HEAD
 EvilEye/
+=======
+>>>>>>> 9aefa814ed1a40bb05a04aec8c2b9f85605174fb
 Examples/

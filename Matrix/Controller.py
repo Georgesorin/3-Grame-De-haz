@@ -25,7 +25,7 @@ import psutil
 from matrix_font import FONT_5x7
 from small_font  import FONT_3x5
 from games.chase_game    import ChaseGame, BOARD_WIDTH, BOARD_HEIGHT
-from display_screen      import launch_display_screen
+from display_screen      import launch_display_screen, launch_score_screen
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "matrix_ctrl_config.json")
@@ -40,6 +40,7 @@ def _load_config():
         "bind_ip":             "0.0.0.0",
         "display_screen":      True,
         "monitor_offset_x":    1920,
+        "score_screen_offset_x": 3200,
     }
     try:
         if os.path.exists(_CFG_FILE):
@@ -221,7 +222,9 @@ class MatrixGUI:
         # ── Jocul activ ──────────────────────────────────────────────────────
         self.active_game: ChaseGame | None = None
 
-        # ── Display screen (al doilea monitor) ───────────────────────────────
+        # ── Display screen (setari/lobby) + Score screen (interior) ─────────
+        self.display_screen = None
+        self.score_screen   = None
         self.root.after(0, self._init_display_screen)
 
         # Receiver
@@ -250,6 +253,15 @@ class MatrixGUI:
             print("[DISPLAY] Second screen launched as Toplevel.")
         except Exception as e:
             print(f"[DISPLAY] Error: {e}")
+        try:
+            self.score_screen = launch_score_screen(
+                self.root,
+                monitor_offset_x=CONFIG.get("score_screen_offset_x", 3200),
+                fullscreen=CONFIG.get("display_fullscreen", False),
+            )
+            print("[SCORE] Score screen launched as Toplevel.")
+        except Exception as e:
+            print(f"[SCORE] Error: {e}")
     # ── UI ────────────────────────────────────────────────────────────────────
 
 
@@ -384,8 +396,8 @@ class MatrixGUI:
                 self.display_screen.set_game("CHASE")
 
     def _on_lobby_start(self, num_players: int, difficulty: str):
-        """Apelat din display_screen cand jucatorul apasa START sau RESTART."""
-        if difficulty == "restart":
+        """Apelat din display_screen cand jucatorul apasa START, RESTART sau SETARI."""
+        if difficulty in ("restart", "back_to_settings"):
             self.root.after(0, self._stop_chase)
             return
         self.root.after(0, lambda: self._start_chase(difficulty))
@@ -394,6 +406,8 @@ class MatrixGUI:
         if self.active_game:
             self.active_game.stop()
             self.active_game = None
+        if self.score_screen:
+            self.score_screen.set_state("idle")
         if self.is_sending:
             self.toggle_sending()
 
@@ -403,10 +417,10 @@ class MatrixGUI:
         if self.active_game:
             self.active_game.stop()
         diff_params = {
-            "Easy":   {"base_period": 0.09,  "lives": 3, "snakes_bonus": -1},
-            "Normal": {"base_period": 0.055, "lives": 3, "snakes_bonus": 0},
-            "Hard":   {"base_period": 0.035, "lives": 2, "snakes_bonus": 1},
-            "Insane": {"base_period": 0.02,  "lives": 1, "snakes_bonus": 2},
+            "Easy":   {"base_period": 0.25,  "lives": 5, "snakes_bonus": -1},
+            "Normal": {"base_period": 0.15,  "lives": 3, "snakes_bonus": 0},
+            "Hard":   {"base_period": 0.09,  "lives": 2, "snakes_bonus": 1},
+            "Insane": {"base_period": 0.05,  "lives": 1, "snakes_bonus": 2},
         }.get(difficulty, {})
         self.active_game = ChaseGame(
             on_game_event=self._on_chase_event,
@@ -419,22 +433,26 @@ class MatrixGUI:
         self.canvas.focus_set()
         if self.display_screen:
             self.display_screen.set_state("playing")
+        if self.score_screen:
+            self.score_screen.set_state("playing")
         if not self.is_sending:
             self.toggle_sending()
 
     def _on_chase_event(self, event_name: str, data: dict):
         """Callback din ChaseGame — ruleaza pe game thread."""
         print(f"[GAME EVENT] {event_name}: {data}")
+        import os
         from display_screen import play_sound
-        sound_map = {
-            "level_up":  "level_up",
-            "game_over": "game_over",
-            "hit":       "hit",
+        _SOUNDS_DIR = os.path.join(os.path.dirname(__file__), "sounds")
+        _SOUND_MAP = {
+            "game_over": os.path.join(_SOUNDS_DIR, "SUPER MARIO - game over - sound effect.mp3"),
+            "level_up":  os.path.join(_SOUNDS_DIR, "Achievement Sound Effect.mp3"),
+            "treasure":  os.path.join(_SOUNDS_DIR, "coin.mp3"),
         }
-        if event_name == "pickup":
-            play_sound(data.get("kind", "collect"))
-        elif event_name in sound_map:
-            play_sound(sound_map[event_name])
+        if event_name == "pickup" and data.get("kind") == "freeze":
+            play_sound(os.path.join(_SOUNDS_DIR, "ice.mp3"))
+        elif event_name in _SOUND_MAP:
+            play_sound(_SOUND_MAP[event_name])
 
     # ── Chase key bindings ────────────────────────────────────────────────────
 
@@ -529,8 +547,11 @@ class MatrixGUI:
         if mode == "Chase Mode" and self.active_game:
             frame = self.active_game.get_frame(self.time_counter)
             # Update al doilea monitor
+            hud = self.active_game.get_hud_info()
             if self.display_screen:
-                self.display_screen.update(self.active_game.get_hud_info())
+                self.display_screen.update(hud)
+            if self.score_screen:
+                self.score_screen.update(hud)
             return frame
 
         if mode == "Manual":

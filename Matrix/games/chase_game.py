@@ -14,15 +14,15 @@ BOARD_HEIGHT = 32
 # ── Palette ────────────────────────────────────────────────────────────────────
 CHASE_WATER          = (5,   42,  95)
 CHASE_SHOAL          = (35,  105, 125)
-CHASE_ISLAND_COAST   = (130, 168, 88)
-CHASE_ISLAND_MID     = (52,  128, 62)
-CHASE_ISLAND_INLAND  = (28,  88,  48)
+CHASE_ISLAND_COAST   = (15,  50,  10)
+CHASE_ISLAND_MID     = (8,   28,  6)
+CHASE_ISLAND_INLAND  = (3,   14,  3)
 CHASE_TREASURE       = (255, 200, 55)
 CHASE_PLAYER         = (0,   245, 220)
 CHASE_PLAYER_SHIELD  = (70,  190, 255)
 CHASE_ENEMY_HEAD     = (255, 50,  50)
 CHASE_ENEMY_BODY     = (180, 20,  30)
-CHASE_PU_FREEZE      = (170, 230, 255)
+CHASE_PU_FREEZE      = (0, 0, 80)
 CHASE_PU_SLOW        = (255, 140, 60)
 CHASE_PU_SHIELD      = (255, 255, 140)
 BLACK                = (0,   0,   0)
@@ -126,7 +126,7 @@ def _noise(x: int, y: int, tick: int) -> float:
     return ((x * 17 + y * 31 + tick * 137) % 256) / 255.0
 
 
-def _vscroll_y(block_height: int, elapsed: float, speed: float = 10.0) -> int:
+def _vscroll_y(block_height: int, elapsed: float, speed: float = 5.0) -> int:
     """Y-offset for a block that enters from the bottom and scrolls upward, looping."""
     total = BOARD_HEIGHT + block_height
     return int(BOARD_HEIGHT - (elapsed * speed) % total)
@@ -200,7 +200,7 @@ class ChaseGame:
         self.on_game_event = on_game_event or (lambda *_: None)
 
         dp = difficulty_params or {}
-        self._base_period   = dp.get("base_period", 0.07)
+        self._base_period   = dp.get("base_period", 0.18)
         self._start_lives   = dp.get("lives", 3)
         self._snakes_bonus  = dp.get("snakes_bonus", 0)
 
@@ -241,13 +241,8 @@ class ChaseGame:
         if player_id >= self.num_players:
             return
 
-        px, py = self._players[player_id]["pos"]
-        dx = (1 if x > px else -1 if x < px else 0)
-        dy = (1 if y > py else -1 if y < py else 0)
-        if dx != 0:
-            self._try_move_player(player_id, dx, 0)
-        elif dy != 0:
-            self._try_move_player(player_id, 0, dy)
+        if 0 <= x < BOARD_WIDTH and 0 <= y < BOARD_HEIGHT:
+            self._players[player_id]["pos"] = (x, y)
 
     def on_key_direction(self, player_id: int, dx: int, dy: int):
         if self._game_state != "playing" or not self._running:
@@ -333,7 +328,7 @@ class ChaseGame:
         gap     = 2
         w_game  = _text_rot_height("GAME")    # 15 px
         blk_h   = w_start + gap + w_game      # 36 px
-        y0      = _vscroll_y(blk_h, t, 8.0)  # slow slide — both words pass through together
+        y0      = _vscroll_y(blk_h, t, 4.0)  # slow slide — both words pass through together
         _draw_text_rot(frame, "START", y0,               (0, 245, 220))
         _draw_text_rot(frame, "GAME",  y0 + w_start + gap, (0, 185, 255))
         _draw_start_circle(frame, t)
@@ -363,19 +358,14 @@ class ChaseGame:
                                  max(0, min(255, g)),
                                  max(0, min(255, b)))
 
-        # Text: rapid white flicker over the rainbow background
-        flicker = 0.65 + 0.35 * abs(math.sin(t * 20))
-        white   = int(255 * flicker)
-        gold    = int(210 * flicker)
-
         lvl_str = str(self._level)
         lh_lvl  = _text_rot_height("LEVEL")
         lh_num  = _text_rot_height(lvl_str)
         gap     = 3
         blk_h   = lh_lvl + gap + lh_num
         y0      = max(1, (BOARD_HEIGHT - blk_h) // 2)
-        _draw_text_rot(frame, "LEVEL", y0,                (white, white, white))
-        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, (white, gold,  0))
+        _draw_text_rot(frame, "LEVEL", y0,                BLACK)
+        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, BLACK)
         return frame
 
     def _frame_game_over_anim(self, now: float) -> dict:
@@ -411,7 +401,7 @@ class ChaseGame:
             w_h   = _text_rot_height("GAME")
             gap   = 8
             blk_h = w_h + gap + w_h
-            y0    = _vscroll_y(blk_h, t2, 11.0)
+            y0    = _vscroll_y(blk_h, t2, 5.5)
             _draw_text_rot(frame, "GAME", y0,             (210, 60,  200))
             _draw_text_rot(frame, "OVER", y0 + w_h + gap, (180, 80,  255))
 
@@ -455,6 +445,7 @@ class ChaseGame:
         self._running    = False
         self._game_state = "level_intro"
         self._anim_start = time.time()
+        self.on_game_event("level_up", {"level": self._level})
 
     # ── Internal: island helpers ───────────────────────────────────────────────
 
@@ -765,6 +756,7 @@ class ChaseGame:
                 self._sea_cells.add(pos)
                 self._wave_gems += 1
                 p["score"] += 10
+                self.on_game_event("treasure", {"player": player_id})
                 if self._wave_gems >= self._wave_need:
                     self._level += 1
                     self._wave_gems = 0
@@ -818,31 +810,19 @@ class ChaseGame:
                     self._hud_msg   = f"P{player_id+1} lovit! -{lost} comori"
                     self._hud_until = now + 1.5
                     self.on_game_event("hit", {"player": player_id, "lives": p["lives"]})
-                    # Spawn a small island at death position + one random extra island
+                    # Rerandomize all islands — death island is guaranteed, rest are fresh
                     dx0, dy0 = death_pos
                     death_island = frozenset(
                         (ix, iy)
                         for ix in range(max(0, dx0-1), min(BOARD_WIDTH,  dx0+2))
                         for iy in range(max(0, dy0-1), min(BOARD_HEIGHT, dy0+2))
                     )
+                    self._random_islands(
+                        num_blobs=random.randint(4, 7),
+                        min_cells=3, max_cells=7,
+                    )
                     self._islands |= death_island
-                    # Random extra small blob away from death spot
-                    extra_tries = 0
-                    while extra_tries < 30:
-                        extra_tries += 1
-                        ecx = random.randint(2, BOARD_WIDTH - 3)
-                        ecy = random.randint(2, BOARD_HEIGHT - 5)
-                        if abs(ecx - dx0) + abs(ecy - dy0) < 6:
-                            continue
-                        blob = {(ecx, ecy)}
-                        cur  = (ecx, ecy)
-                        for _ in range(random.randint(2, 4)):
-                            nx2, ny2 = cur[0] + random.choice([-1,0,1]), cur[1] + random.choice([-1,0,1])
-                            if 0 <= nx2 < BOARD_WIDTH and 0 <= ny2 < BOARD_HEIGHT:
-                                blob.add((nx2, ny2))
-                                cur = (nx2, ny2)
-                        self._islands |= blob
-                        break
+                    self._islands |= _HOME_ISLAND
                     self._rebuild_shoal()
                     # Respawn snakes so they don't get stuck on new islands
                     self._snakes = []
@@ -922,14 +902,22 @@ class ChaseGame:
                 min(255, base[2]),
             )
 
-        # Freeze border
+        # Freeze border — flickers faster as it nears expiry
         if now < self._freeze_until:
-            edge = (120, 200, 255)
-            for x in range(BOARD_WIDTH):
-                frame[(x, 0)]               = edge
-                frame[(x, BOARD_HEIGHT-1)]  = edge
-            for y in range(BOARD_HEIGHT):
-                frame[(0, y)]               = edge
-                frame[(BOARD_WIDTH-1, y)]   = edge
+            remaining = self._freeze_until - now
+            if remaining > 3.0:
+                show = True
+            else:
+                # ramps from 2 Hz → 10 Hz in the last 3 seconds
+                freq = 2.0 + (3.0 - remaining) * (8.0 / 3.0)
+                show = int(now * freq * 2) % 2 == 0
+            if show:
+                edge = CHASE_PU_FREEZE
+                for x in range(BOARD_WIDTH):
+                    frame[(x, 0)]              = edge
+                    frame[(x, BOARD_HEIGHT-1)] = edge
+                for y in range(BOARD_HEIGHT):
+                    frame[(0, y)]              = edge
+                    frame[(BOARD_WIDTH-1, y)]  = edge
 
         return frame

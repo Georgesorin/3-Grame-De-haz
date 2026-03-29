@@ -1,3 +1,13 @@
+"""
+Live scoreboard for Piano Tiles over UDP.
+
+Run while Piano_Tiles_Game.py is running. The game sends JSON snapshots to
+  scoreboard_host : scoreboard_udp_port  (default 127.0.0.1:7810, from piano_tiles_config.json)
+
+Usage:
+  python piano_tiles_scoreboard.py
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,7 +26,6 @@ import Piano_Tiles_Game as ptg  # noqa: E402
 
 POLL_MS = 80
 MAX_PLAYER_ROWS = 4
-WINDOW_TITLE = "Scoreboard"
 
 
 def _song_fallback() -> str:
@@ -24,7 +33,7 @@ def _song_fallback() -> str:
 
 
 class ScoreboardApp:
-    def __init__(self) -> None:
+    def __init__(self, master=None) -> None:
         self._last: dict | None = None
         self.sock: socket.socket | None = None
         self._bind_error: str | None = None
@@ -38,8 +47,11 @@ class ScoreboardApp:
         except OSError as e:
             self._bind_error = str(e)
 
-        self.root = tk.Tk()
-        self.root.title(WINDOW_TITLE)
+        if master is None:
+            self.root = tk.Tk()
+        else:
+            self.root = tk.Toplevel(master)
+        self.root.title("Piano Tiles — Scoreboard (UDP)")
         self.root.configure(bg="#12121a")
         self.root.minsize(440, 280)
 
@@ -49,28 +61,53 @@ class ScoreboardApp:
             base_family = "Consolas"
 
         self.title_font = tkfont.Font(family=base_family, size=18, weight="bold")
+        self.song_font = tkfont.Font(family=base_family, size=14)
         self.header_font = tkfont.Font(family=base_family, size=10, weight="bold")
         self.row_font = tkfont.Font(family=base_family, size=12)
+        self.status_font = tkfont.Font(family=base_family, size=10)
 
-        self.lbl_title = tk.Label(
+        tk.Label(
             self.root,
-            text="Waiting for game…",
+            text="Piano Tiles",
             font=self.title_font,
+            fg="#e8e8f0",
+            bg="#12121a",
+        ).pack(pady=(12, 2))
+
+        port_lbl = f"UDP :{ptg.SCOREBOARD_UDP_PORT}"
+        tk.Label(
+            self.root,
+            text=port_lbl,
+            font=self.status_font,
+            fg="#606078",
+            bg="#12121a",
+        ).pack(pady=(0, 4))
+
+        self.lbl_song = tk.Label(
+            self.root,
+            text="—",
+            font=self.song_font,
             fg="#7eb6ff",
             bg="#12121a",
             wraplength=520,
             justify=tk.CENTER,
         )
-        self.lbl_title.pack(pady=(12, 6))
+        self.lbl_song.pack(pady=(0, 8))
 
-        accent = tk.Frame(self.root, bg="#3d7adb", height=3)
-        accent.pack_propagate(False)
-        accent.pack(fill=tk.X, padx=80, pady=(0, 10))
+        self.lbl_status = tk.Label(
+            self.root,
+            text="",
+            font=self.status_font,
+            fg="#8888a0",
+            bg="#12121a",
+            wraplength=520,
+        )
+        self.lbl_status.pack(pady=(0, 6))
 
         hdr = tk.Frame(self.root, bg="#1e1e2e")
         hdr.pack(fill=tk.X, padx=12, pady=4)
-        headers = ("Player", "Score")
-        widths = (14, 10)
+        headers = ("Player", "Score", "Streak", "Next ×")
+        widths = (14, 10, 8, 8)
         for i, text in enumerate(headers):
             tk.Label(
                 hdr,
@@ -90,7 +127,7 @@ class ScoreboardApp:
         self.player_labels: list[list[tk.Label]] = []
         for r in range(MAX_PLAYER_ROWS):
             row_widgets: list[tk.Label] = []
-            for c in range(2):
+            for c in range(4):
                 lbl = tk.Label(
                     self.rows_frame,
                     text="—",
@@ -107,8 +144,8 @@ class ScoreboardApp:
             self.player_labels.append(row_widgets)
 
         if self._bind_error:
-            self.lbl_title.config(
-                text=f"UDP :{ptg.SCOREBOARD_UDP_PORT} — bind failed: {self._bind_error}",
+            self.lbl_status.config(
+                text=f"Could not bind UDP port {ptg.SCOREBOARD_UDP_PORT}: {self._bind_error}",
                 fg="#ff6666",
             )
 
@@ -147,23 +184,32 @@ class ScoreboardApp:
         self._drain_udp()
 
         if self._last is None:
+            song = _song_fallback() or "—"
+            self.lbl_song.config(text=song)
             if not self._bind_error:
-                self.lbl_title.config(text="Waiting for game…", fg="#7eb6ff")
+                self.lbl_status.config(
+                    text=f"Waiting for packets on UDP {ptg.SCOREBOARD_UDP_PORT}…",
+                    fg="#8888a0",
+                )
             for row in self.player_labels:
-                for c in range(2):
-                    row[c].config(text="—", fg="#505068")
+                for c in range(4):
+                    row[c].config(text="—" if c < 2 else "", fg="#505068")
             self.root.after(POLL_MS, self._poll)
             return
 
-        if not self._bind_error:
-            song = self._last.get("song")
-            if isinstance(song, str) and song.strip():
-                display = song.strip()
-            else:
-                display = _song_fallback() or "—"
-            self.lbl_title.config(text=display, fg="#7eb6ff")
+        data = self._last
+        song = (data.get("song") or "").strip() or _song_fallback() or "—"
+        self.lbl_song.config(text=song)
 
-        players = self._last.get("players")
+        state = data.get("state", "?")
+        n = data.get("num_players", 0)
+        cmax = data.get("combo_max", ptg.COMBO_MAX)
+        self.lbl_status.config(
+            text=f"State: {state}   ·   Players: {n}   ·   Combo cap (×): {cmax}",
+            fg="#8888a0",
+        )
+
+        players = data.get("players")
         if not isinstance(players, list):
             players = []
 
@@ -174,8 +220,11 @@ class ScoreboardApp:
                 slot = int(p.get("slot", i))
                 row[0].config(text=f"Player {slot + 1}", fg="#d0d0e0")
                 row[1].config(text=str(p.get("score", 0)), fg="#d0d0e0")
+                row[2].config(text=str(p.get("combo", 0)), fg="#d0d0e0")
+                nx = p.get("combo_mult_next", 1)
+                row[3].config(text=str(nx), fg="#a8d896")
             else:
-                for c in range(2):
+                for c in range(4):
                     row[c].config(text="", fg="#505068")
 
         self.root.after(POLL_MS, self._poll)

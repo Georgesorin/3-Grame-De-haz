@@ -7,5 +7,5 @@
   "auto_start_receiver": true,
   "auto_start_streaming": false,
   "log_events": true,
-  "virtual_iface_ip": "192.168.1.7"
+  "virtual_iface_ip": "0.0.0.0"
 }

@@ -316,9 +316,9 @@ class LightService:
         self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._recv_sock.settimeout(0.5)
         try:
-            # Bind to 0.0.0.0 (all interfaces) to receive both loopback spray and external traffic
-            self._recv_sock.bind(("0.0.0.0", self._recv_port))
-            self._log(f"Receiver listening on 0.0.0.0:{self._recv_port}")
+            bind_host = (self._bind_ip or "0.0.0.0").strip() or "0.0.0.0"
+            self._recv_sock.bind((bind_host, self._recv_port))
+            self._log(f"Receiver listening on {bind_host}:{self._recv_port}")
         except Exception as e:
             self._log(f"Receiver bind error: {e}")
             self._recv_running = False
