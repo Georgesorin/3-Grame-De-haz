@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
-"""
-FIRE! – Reaction Game for the Evil Eye LED hardware
-4 walls · 10 buttons per wall · 1 eye per wall (up to 4 players)
 
-Rules:
-  • Word is spoken FIRST, then the lit button appears → press or don't
-  • "FIRE" + RED eye  → press your lit button ASAP
-  • "FIRE" + GREEN eye → do NOT press  (Stroop trap)
-  • Fake cues: FIVE, FILE, FIR, FIRETRUCK, FIREWORK, FIRED …
-  • First to correctly press wins the round  → BOOM + "Player X survives!"
-  • Wrong press (wrong word, or GREEN fire) → clown fail sound
-
-Requirements:
-  pip install pyttsx3      (falls back to PowerShell TTS if missing)
-"""
-
+import json
 import os, socket, threading, time, random, queue, math, wave, ctypes
 import tkinter as tk
 from tkinter import scrolledtext
@@ -28,6 +14,41 @@ LEDS_PER_CHANNEL  = 11
 FRAME_DATA_LEN    = LEDS_PER_CHANNEL * NUM_CHANNELS * 3
 _DEFAULT_SEND_PORT = 4626
 _DEFAULT_RECV_PORT = 7800
+
+_EYE_CFG_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "eye_ctrl_config.json")
+)
+
+
+def _load_eye_ctrl_config():
+    """Load EvilEye/eye_ctrl_config.json (same file as Controller / Color Rush)."""
+    defaults = {
+        "device_ip": "",
+        "udp_port": _DEFAULT_SEND_PORT,
+        "receiver_port": _DEFAULT_RECV_PORT,
+    }
+    try:
+        with open(_EYE_CFG_PATH, encoding="utf-8") as f:
+            user = json.load(f)
+        if isinstance(user, dict):
+            defaults.update(user)
+    except Exception:
+        pass
+    return defaults
+
+
+def _fire_network_from_cfg(cfg):
+    """device_ip, send_port, recv_port for FireGame."""
+    ip = (cfg.get("device_ip") or "").strip() or "255.255.255.255"
+    try:
+        udp = int(cfg.get("udp_port", _DEFAULT_SEND_PORT))
+    except (TypeError, ValueError):
+        udp = _DEFAULT_SEND_PORT
+    try:
+        recv = int(cfg.get("receiver_port", _DEFAULT_RECV_PORT))
+    except (TypeError, ValueError):
+        recv = _DEFAULT_RECV_PORT
+    return ip, udp, recv
 
 _PASSWORD = [
     35,63,187,69,107,178,92,76,39,69,205,37,223,255,165,231,
@@ -700,8 +721,14 @@ class FireGameUI:
         self._score_lbl = {}
         self._scores_win = None
         self._build_ui()
+        self._apply_eye_cfg_to_ui()
         self._build_scores_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _apply_eye_cfg_to_ui(self):
+        cfg = _load_eye_ctrl_config()
+        ip, _, _ = _fire_network_from_cfg(cfg)
+        self._ip_var.set(ip)
 
     def _build_ui(self):
         # ── Top bar ──────────────────────────────────────────────────────────
@@ -726,7 +753,7 @@ class FireGameUI:
             return tk.Label(cfg, text=t, bg="#141414", fg="#9a9a9a",
                             font=("Segoe UI", 9))
 
-        self._ip_var = tk.StringVar(value="255.255.255.255")
+        self._ip_var = tk.StringVar(value="")
         self._rounds_var = tk.IntVar(value=10)
         self._pvar = {}
 
@@ -891,10 +918,13 @@ class FireGameUI:
         self._apply_scores({1: 0, 2: 0, 3: 0, 4: 0})
         self._lbl_word.config(text="", fg="white")
         self._lbl_eye.config(text="")
+        cfg = _load_eye_ctrl_config()
+        ip, send_port, recv_port = _fire_network_from_cfg(cfg)
+        self._ip_var.set(ip)
         self.game = FireGame(
-            device_ip  = self._ip_var.get(),
-            send_port  = _DEFAULT_SEND_PORT,
-            recv_port  = _DEFAULT_RECV_PORT,
+            device_ip  = ip,
+            send_port  = send_port,
+            recv_port  = recv_port,
             on_event   = self._on_game_event,
         )
         self.game.start(
