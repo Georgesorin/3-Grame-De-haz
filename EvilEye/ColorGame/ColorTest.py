@@ -1176,4 +1176,7 @@ class ColorRushApp(tk.Tk):
 
 
 if __name__ == "__main__":
+    import evil_eye_network_setup
+
+    evil_eye_network_setup.run_startup_discovery_and_save_config()
     ColorRushApp().mainloop()

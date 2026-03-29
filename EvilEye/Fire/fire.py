@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import json
-import os, socket, threading, time, random, queue, math, wave, ctypes
+import os, socket, sys, threading, time, random, queue, math, wave, ctypes
 import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
@@ -1051,4 +1051,10 @@ def main():
     root.mainloop()
 
 if __name__ == "__main__":
+    _evileye_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    if _evileye_root not in sys.path:
+        sys.path.insert(0, _evileye_root)
+    import evil_eye_network_setup
+
+    evil_eye_network_setup.run_startup_discovery_and_save_config()
     main()

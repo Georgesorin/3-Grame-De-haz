@@ -44,11 +44,20 @@ def _interfaces_from_psutil():
     except ImportError:
         return []
 
+    # Stub/wrong package named psutil, or very old build — skip instead of crashing.
+    net_if_addrs = getattr(psutil, "net_if_addrs", None)
+    if not callable(net_if_addrs):
+        return []
+    try:
+        by_iface = net_if_addrs()
+    except (OSError, RuntimeError, TypeError):
+        return []
+
     out = []
     seen = set()
     # Compare int(family) — on some Windows builds family may not be identical to socket.AF_INET
     af_inet = int(socket.AF_INET)
-    for iface, addrs in psutil.net_if_addrs().items():
+    for iface, addrs in by_iface.items():
         for addr in addrs:
             if int(addr.family) != af_inet:
                 continue

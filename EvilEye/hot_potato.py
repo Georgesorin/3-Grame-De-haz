@@ -17,6 +17,8 @@ Wall assignment
 • 4 teams  → A: wall 1,     B: wall 2,  C: wall 3,  D: wall 4
 
 Run:  python hot_potato.py
+
+LED colours in code are logical (R, G, B). UDP frames use GRB via Controller.logical_rgb_to_wire_grb.
 """
 
 import os
@@ -33,9 +35,16 @@ if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 from Controller import (
-    LightService, load_config, save_config,
-    NUM_CHANNELS, LEDS_PER_CHANNEL,
+    LightService,
+    load_config,
+    logical_rgb_to_wire_grb,
+    receiver_bind_ip_from_config,
+    save_config,
+    NUM_CHANNELS,
+    LEDS_PER_CHANNEL,
 )
+
+assert logical_rgb_to_wire_grb(1, 2, 3) == (2, 1, 3)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -53,6 +62,7 @@ WALL_MAP = {
     4: {0: [1],    1: [2],    2: [3],    3: [4]},
 }
 
+# Logical RGB; LightService encodes GRB on the wire.
 TEAM_COLORS_RGB = [
     (255,  60,   0),   # A – orange-red
     (  0, 100, 255),   # B – blue
@@ -65,7 +75,7 @@ TEAM_NAMES_DEFAULT = ["TEAM A", "TEAM B", "TEAM C", "TEAM D"]
 # Number of buttons that must be pressed to pass the potato
 TOUCHES_NEEDED = {"easy": 1, "medium": 2, "hard": 3}
 
-# LED colours
+# Logical RGB for set_led(...)
 RED    = (255,   0,   0)
 GREEN  = (  0, 255,   0)
 YELLOW = (255, 200,   0)
@@ -138,6 +148,7 @@ class HotPotatoGame:
     """
     State machine that runs in a background thread.
     All UI feedback via on_event(name, dict) – marshalled to main thread by caller.
+    set_led(..., r, g, b) is logical RGB; frames use GRB (build_frame_data).
     """
 
     def __init__(self, service: LightService, on_event):
@@ -402,6 +413,7 @@ class HotPotatoApp(tk.Tk):
         if ip:
             self._service.set_device(ip, self._cfg.get("udp_port", 4626))
         self._service.set_recv_port(self._cfg.get("receiver_port", 7800))
+        self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
         self._service.start_receiver()
         self._service.start_polling()
