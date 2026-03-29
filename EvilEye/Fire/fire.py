@@ -15,7 +15,7 @@ Requirements:
   pip install pyttsx3      (falls back to PowerShell TTS if missing)
 """
 
-import os, socket, threading, time, random, queue, math, wave
+import os, socket, threading, time, random, queue, math, wave, ctypes
 import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
@@ -98,11 +98,68 @@ def _make_frame(led_states):
     return bytes(frame)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sound configuration  ← edit these to tune behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+_BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+_SOUNDS_DIR = os.path.join(_BASE_DIR, "sounds")
+_BOOM       = os.path.join(_BASE_DIR, "_boom.wav")
+_FAIL       = os.path.join(_BASE_DIR, "_fail.wav")
+
+# Timing (seconds)
+LIGHT_START_DELAY = 1.0   # after sound starts  → white buttons turn ON
+LIGHT_END_DELAY   = 1.0   # after sound ends    → white buttons turn OFF
+ROUND_PAUSE       = 2.0   # pause after lights off before next sound starts
+PRE_GAME_PAUSE    = 2.0   # pause after GO sound before first round
+PRE_SOUND_DELAY   = 2.0   # silence before each game sound (builds tension)
+
+# Folder weights – higher number = picked more often
+# 'fire' → is_fire=True (correct press = point); all others → is_fire=False (pressing = fail)
+FOLDER_WEIGHTS = {
+    'fire':       2,
+    'very_close': 5,
+    'funny':      2,
+    'random':     1,
+}
+MAX_NO_FIRE_STREAK = 5    # force 'fire' folder if not picked in this many consecutive plays
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows MCI audio + sound file scanning
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    _winmm = ctypes.windll.winmm
+except Exception:
+    _winmm = None
+
+_MCI_ALIAS = "firegame_snd"
+
+def _mci(cmd):
+    if _winmm:
+        buf = ctypes.create_unicode_buffer(512)
+        _winmm.mciSendStringW(cmd, buf, 512, None)
+        return buf.value.strip()
+    return ""
+
+def _scan_sounds():
+    result = {}
+    if not os.path.isdir(_SOUNDS_DIR):
+        return result
+    for folder in list(FOLDER_WEIGHTS.keys()) + ['ready']:
+        fpath = os.path.join(_SOUNDS_DIR, folder)
+        if os.path.isdir(fpath):
+            files = sorted([
+                os.path.join(fpath, f) for f in os.listdir(fpath)
+                if f.lower().endswith(('.mp3', '.wav', '.ogg'))
+            ])
+            if files:
+                result[folder] = files
+    return result
+
+_SOUND_FILES = _scan_sounds()
+print(f"[sounds] loaded: { {k: len(v) for k, v in _SOUND_FILES.items()} }")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sound effects  (generated at startup, cached as WAV files)
 # ─────────────────────────────────────────────────────────────────────────────
-_SFX = os.path.dirname(os.path.abspath(__file__))
-_BOOM = os.path.join(_SFX, "_boom.wav")
-_FAIL = os.path.join(_SFX, "_fail.wav")
 
 def _save_wav(path, data, rate=44100):
     with wave.open(path, 'w') as f:
@@ -162,6 +219,58 @@ def _play(path):
     threading.Thread(target=_t, daemon=True).start()
 
 _init_sounds()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MP3 / audio playback helpers  (Windows MCI – no extra packages needed)
+# ─────────────────────────────────────────────────────────────────────────────
+def _stop_mp3():
+    """Stop and close the main audio channel immediately."""
+    if _winmm:
+        try:
+            _mci(f'stop {_MCI_ALIAS}')
+            _mci(f'close {_MCI_ALIAS}')
+        except Exception:
+            pass
+
+def _play_mp3_blocking(path):
+    """Play audio file and block until it finishes."""
+    if _winmm:
+        try:
+            _stop_mp3()
+            _mci(f'open "{path}" type mpegvideo alias {_MCI_ALIAS}')
+            _mci(f'play {_MCI_ALIAS} from 0')
+            while _mci(f'status {_MCI_ALIAS} mode').lower() == 'playing':
+                time.sleep(0.05)
+            _stop_mp3()
+            return
+        except Exception as e:
+            print(f"[sound] MCI blocking error: {e}")
+    time.sleep(2.5)
+
+def _play_mp3_start(path):
+    """Start playing audio non-blocking. Returns (start_time, estimated_duration)."""
+    dur = 2.5
+    if _winmm:
+        try:
+            _stop_mp3()
+            _mci(f'open "{path}" type mpegvideo alias {_MCI_ALIAS}')
+            _mci(f'set {_MCI_ALIAS} time format milliseconds')
+            ms = _mci(f'status {_MCI_ALIAS} length')
+            if ms:
+                dur = int(ms) / 1000.0
+            _mci(f'play {_MCI_ALIAS} from 0')
+        except Exception as e:
+            print(f"[sound] MCI start error: {e}")
+    return time.time(), dur
+
+def _mp3_still_playing():
+    """True if main audio is currently playing."""
+    if _winmm:
+        try:
+            return _mci(f'status {_MCI_ALIAS} mode').lower() == 'playing'
+        except Exception:
+            pass
+    return False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS engine  (single thread, varied voices per word)
@@ -229,28 +338,7 @@ class _TTS:
     def stop(self):
         self._q.put(None)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Word lists  (fakes >> normal for maximum confusion)
-# ─────────────────────────────────────────────────────────────────────────────
-_NORMAL = [
-    "WATER","STONE","CLOUD","RIVER","FOREST","MOUNTAIN","THUNDER","SHADOW",
-    "WIND","OCEAN","DESERT","VALLEY","BRIDGE","CASTLE","TOWER","HARBOR",
-    "WINTER","SUMMER","SPRING","AUTUMN","NIGHT","DAWN","STORM","GLASS",
-    "EAGLE","WOLF","BEAR","TIGER","HAWK","SNAKE","DEER","ARROW",
-    "SWORD","SHIELD","ARMOR","SPEAR","BLADE","GOLD","SILVER","IRON",
-]
-_FAKES = [
-    # phonetically close to FIRE
-    "FIVE","FILE","FIR","FIRM","FIRST","FIRED",
-    "FIRING","FINER","FIVER","FINDER","FILTER","FINGER",
-    "FINAL","FINEST","FINISH","FIGURE","FIZZ","FIBER",
-    # compound FIRE- words (players hear start of FIRE then continue)
-    "FIRETRUCK","FIREWORK","FIREMAN","FIRESIDE","FIREBALL",
-    "FIREFOX","FIREWALL","FIREWOOD","FIREHOUSE","FIREPOT",
-    "FIREGUARD","FIRENZE","FIREWIRE",
-]
-_TARGET = "FIRE"
-_EYE    = 0
+_EYE = 0
 
 _PCOL     = {1:(255,80,0), 2:(0,120,255), 3:(200,0,200), 4:(0,200,80)}
 _PCOL_HEX = {k:"#%02x%02x%02x"%v for k,v in _PCOL.items()}
@@ -284,6 +372,7 @@ class FireGame:
         self._cur_lit       = {}
         self._react_ev      = threading.Event()
         self._react_winner  = None
+        self._no_fire_streak = 0
 
         self._tts = _TTS()
 
@@ -372,9 +461,10 @@ class FireGame:
             self._react_winner = ch
             self._react_ev.set()
         else:
-            # Wrong timing or green-fire trap → fail sound
+            # Wrong timing or green-fire trap → fail sound + penalty
+            self.scores[ch] -= 1
             _play(_FAIL)
-            self._emit("wrong_press", player=ch)
+            self._emit("wrong_press", player=ch, scores=dict(self.scores))
 
     # ── Emit ──────────────────────────────────────────────────────────────────
     def _emit(self, event, **kw):
@@ -399,19 +489,46 @@ class FireGame:
         self._running = False
         self._react_ev.set()
 
+    # ── Sound folder picker ───────────────────────────────────────────────────
+    def _pick_sound_folder(self):
+        available = [f for f in FOLDER_WEIGHTS if f in _SOUND_FILES]
+        if not available:
+            return None
+        # Force fire if streak exceeded
+        if self._no_fire_streak >= MAX_NO_FIRE_STREAK and 'fire' in available:
+            self._no_fire_streak = 0
+            return 'fire'
+        weights = [FOLDER_WEIGHTS[f] for f in available]
+        folder  = random.choices(available, weights=weights)[0]
+        if folder == 'fire':
+            self._no_fire_streak = 0
+        else:
+            self._no_fire_streak += 1
+        return folder
+
     # ── Game loop ─────────────────────────────────────────────────────────────
     def _game_loop(self):
         self._all_off()
+        self._no_fire_streak = 0
 
-        # Countdown 3-2-1 (fixed voice)
-        for n in (3, 2, 1):
+        # Countdown – play one random sound from GO/ folder
+        go_sounds = list(_SOUND_FILES.get('GO', []))
+        if go_sounds:
             self._set_eyes(255, 165, 0)
             self._flush()
-            self._tts.speak(str(n), vary=False)
+            _play_mp3_blocking(random.choice(go_sounds))
             self._all_off()
-            time.sleep(0.25)
-        self._tts.speak("GO", block=False, vary=False)
-        time.sleep(0.6)
+        else:
+            # Fallback: fast TTS
+            for n in (3, 2, 1):
+                self._set_eyes(255, 165, 0)
+                self._flush()
+                self._tts.speak(str(n), vary=False)
+                self._all_off()
+
+        _wait_interruptible(PRE_GAME_PAUSE, self)
+        if not self._running:
+            return
 
         while self.round_num < self.total_rounds and self._running:
             self._play_round()
@@ -435,80 +552,96 @@ class FireGame:
         self._emit("round_start", round_num=self.round_num,
                    total=self.total_rounds, scores=dict(self.scores))
 
-        # 0–2 warmup words (short, unpredictable)
-        for _ in range(random.randint(0, 2)):
-            if not self._running:
-                return
-            self._play_word(is_fire=False)
-
-        if not self._running:
+        folder = self._pick_sound_folder()
+        if folder is None or folder not in _SOUND_FILES:
+            time.sleep(0.5)
             return
-        self._play_word(is_fire=True)
 
-    def _play_word(self, is_fire):
-        # ── Choose word ───────────────────────────────────────────────────
+        sound_file = random.choice(_SOUND_FILES[folder])
+        self._play_word(is_fire=(folder == 'fire'), sound_file=sound_file)
+
+    def _play_word(self, is_fire, sound_file):
+        # ── Setup ─────────────────────────────────────────────────────────
         if is_fire:
-            word = _TARGET
             self._fire_color = random.choices(['red','green'], weights=[3,1])[0]
         else:
             self._fire_color = None
-            # ~65 % fakes, ~35 % normal words
-            word = (random.choice(_FAKES)
-                    if random.random() < 0.65
-                    else random.choice(_NORMAL))
 
-        self._cur_lit = {ch: random.randint(1,10) for ch in self.active_players}
-        self._emit("word", word=word, is_fire=is_fire,
-                   fire_color=self._fire_color, lit=dict(self._cur_lit))
+        self._cur_lit      = {ch: random.randint(1,10) for ch in self.active_players}
+        self._react_winner = None
+        self._react_open   = False
+        if is_fire:
+            self._react_ev.clear()
 
-        # ── 1. Speak FIRST (random voice for surprise) ────────────────────
-        self._tts.speak(word, block=True, vary=True)
+        self._emit("word",
+                   word=os.path.splitext(os.path.basename(sound_file))[0],
+                   is_fire=is_fire, fire_color=self._fire_color,
+                   lit=dict(self._cur_lit))
 
-        # ── 2. THEN light up the button (and eye for FIRE) ────────────────
+        # ── 1. Wait PRE_SOUND_DELAY, then start sound ────────────────────
+        _wait_interruptible(PRE_SOUND_DELAY, self)
+        if not self._running:
+            return
+        sound_start, sound_dur = _play_mp3_start(sound_file)
+
+        # ── 2. Wait LIGHT_START_DELAY then turn on white buttons ──────────
+        _wait_interruptible(LIGHT_START_DELAY, self)
+        if not self._running:
+            return
+
         self._all_off()
         for ch, led in self._cur_lit.items():
-            self._set(ch, led, 255, 255, 255)          # button = WHITE
+            self._set(ch, led, 255, 255, 255)
         if is_fire:
             eye_rgb = (255,0,0) if self._fire_color=='red' else (0,255,0)
             self._set_eyes(*eye_rgb)
-
-        # Open reaction window before flush so no press is missed
-        self._react_winner = None
-        if is_fire:
-            self._react_ev.clear()
         self._react_open = True
         self._flush()
 
-        # ── 3. Wait for reaction ──────────────────────────────────────────
-        if is_fire:
-            # Up to 1.5 s after button appears
-            self._react_ev.wait(timeout=1.5)
-            self._react_open = False
+        # ── 3. Wait until sound finishes ──────────────────────────────────
+        deadline = sound_start + sound_dur + 3.0   # +3 s safety margin
+        while self._running and time.time() < deadline:
+            if not _mp3_still_playing():
+                break
+            if is_fire and self._react_winner is not None:
+                break
+            time.sleep(0.02)
 
+        # ── 4. Keep lights on for LIGHT_END_DELAY after sound ends ────────
+        end_deadline = time.time() + LIGHT_END_DELAY
+        while self._running and time.time() < end_deadline:
+            if is_fire and self._react_winner is not None:
+                break
+            time.sleep(0.02)
+
+        # ── 5. Lights OFF ─────────────────────────────────────────────────
+        self._react_open = False
+        self._all_off()
+
+        # ── 6. Handle outcome ─────────────────────────────────────────────
+        if is_fire:
             if self._react_winner:
                 w = self._react_winner
                 self.scores[w] += 1
+                _stop_mp3()
                 _play(_BOOM)
                 self._emit("round_win", winner=w,
                            fire_color=self._fire_color,
                            round_num=self.round_num,
                            scores=dict(self.scores))
                 time.sleep(0.25)
-                self._tts.speak(f"Player {w} survives!", block=False, vary=False)
+                self._tts.speak(f"Player {w} survives!", block=True, vary=False)
                 self._winner_flash(w)
+                _wait_interruptible(ROUND_PAUSE, self)
+                return
             else:
                 if self._fire_color == 'red':
                     self._emit("round_miss", round_num=self.round_num)
                 else:
                     self._emit("round_safe", round_num=self.round_num)
-        else:
-            # Brief window (0.8 s) where pressing the lit button = fail
-            _wait_interruptible(0.8, self)
-            self._react_open = False
 
-        # ── 4. Clear and short pause ──────────────────────────────────────
-        self._all_off()
-        _wait_interruptible(random.uniform(0.3, 1.5), self)
+        # Pause between rounds (after lights off, before next sound)
+        _wait_interruptible(ROUND_PAUSE, self)
 
     def _winner_flash(self, winner, rounds=4):
         col = _PCOL[winner]
@@ -725,9 +858,11 @@ class FireGameUI:
             self._log_msg("GREEN eye – nobody pressed, safe.")
 
         elif event == "wrong_press":
-            p = kw["player"]
-            self._lbl_eye.config(text=f"Player {p}: WRONG!", fg="#ff0055")
-            self._log_msg(f"  WRONG PRESS – Player {p}")
+            p, sc = kw["player"], kw.get("scores", {})
+            for pid, lbl in self._score_lbl.items():
+                lbl.config(text=str(sc.get(pid, 0)))
+            self._lbl_eye.config(text=f"Player {p}: WRONG! -1", fg="#ff0055")
+            self._log_msg(f"  WRONG PRESS – Player {p} → {sc.get(p, '?')}")
 
         elif event == "stopped":
             self._running = False
