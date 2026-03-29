@@ -18,6 +18,81 @@ if _MATRIX_DIR not in sys.path:
 try:
     from matrix_font import FONT_5x7 as _FONT_5x7  # type: ignore
 except ImportError:
+    _FONT_5x7 = {}
+
+_SOUNDS_DIR = os.path.join(_MATRIX_DIR, "sounds")
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    if s == 0.0:
+        iv = int(v * 255)
+        return iv, iv, iv
+    i = int(h * 6)
+    f = h * 6 - i
+    p, q, t_v = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i %= 6
+    rgb = [(v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q)][i]
+    return int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+
+
+def _play_sound_async(filename: str, delay: float = 0.0) -> None:
+    """Play a sound file from the sounds directory in a background thread."""
+    path = os.path.join(_SOUNDS_DIR, filename)
+    def _run():
+        try:
+            if delay > 0:
+                time.sleep(delay)
+            if not os.path.exists(path):
+                print(f"[sound] not found: {path}")
+                return
+            snd = pygame.mixer.Sound(path)
+            snd.play()
+            time.sleep(snd.get_length() + 0.3)  # keep alive until done
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_SOUNDS_DIR = os.path.join(_MATRIX_DIR, "sounds")
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    if s == 0.0:
+        iv = int(v * 255)
+        return iv, iv, iv
+    i = int(h * 6)
+    f = h * 6 - i
+    p, q, t_v = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i %= 6
+    rgb = [(v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q)][i]
+    return int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+
+
+def _play_sound_async(filename: str, delay: float = 0.0) -> None:
+    """Play a sound file from the sounds directory in a background thread."""
+    path = os.path.join(_SOUNDS_DIR, filename)
+    def _run():
+        try:
+            if delay > 0:
+                time.sleep(delay)
+            if not os.path.exists(path):
+                print(f"[sound] not found: {path}")
+                return
+            snd = pygame.mixer.Sound(path)
+            snd.play()
+            time.sleep(snd.get_length() + 0.3)  # keep alive until done
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# Import 5×7 pixel font from parent Matrix directory
+_MATRIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
+try:
+    from matrix_font import FONT_5x7 as _FONT_5x7  # type: ignore
+except ImportError:
     _FONT_5x7 = {}  # fallback: no text rendered
 
 # ---------------------------------------------------------------------------
@@ -367,6 +442,11 @@ class PianoTilesGame:
     music_file: str = ""
     victory_start: float = 0.0
     winner_slot: int = 0
+    _victory_sounds_done: Set[int] = field(default_factory=set)
+    countdown_start: float = 0.0
+    music_file: str = ""
+    victory_start: float = 0.0
+    winner_slot: int = 0
 
     def _active_chart_path(self) -> str:
         if self.chart_file_override:
@@ -439,7 +519,9 @@ class PianoTilesGame:
             self.chart_next_index = 0
             self._song_end_message_printed = False
             self.countdown_start = time.time()
+            self._victory_sounds_done = set()
             self.state = "COUNTDOWN"
+            _play_sound_async("3 2 1 0 Countdown With Sound Effect  No Copyright  Ready To Use.mp3", delay=1.0)
 
     def reset(self) -> None:
         with self.lock:
@@ -566,12 +648,21 @@ class PianoTilesGame:
                     if self.music_file:
                         try:
                             pygame.mixer.music.load(self.music_file)
-                            pygame.mixer.music.play()
+                            pygame.mixer.music.play(0)
                         except Exception:
                             pass
                 return
             if self.state == "VICTORY_ANIM":
-                if time.time() - self.victory_start >= 11.0:
+                elapsed = time.time() - self.victory_start
+                # Phase 1 start (~2.5s): drum roll for suspense
+                if elapsed >= 2.5 and 1 not in self._victory_sounds_done:
+                    self._victory_sounds_done.add(1)
+                    _play_sound_async("drum_roll.mp3")
+                # Phase 3 start (~7.5s): victory fanfare
+                if elapsed >= 7.5 and 3 not in self._victory_sounds_done:
+                    self._victory_sounds_done.add(3)
+                    _play_sound_async("Victory Sound Effect.mp3")
+                if elapsed >= 11.0:
                     self.state = "ENDED"
                 return
             if self.state != "PLAYING":
@@ -615,6 +706,11 @@ class PianoTilesGame:
             ):
                 self.state = "VICTORY_ANIM"
                 self.victory_start = time.time()
+                self._victory_sounds_done = set()
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
                 if self.players:
                     self.winner_slot = max(self.players, key=lambda p: p.score).slot
                 else:
@@ -680,10 +776,13 @@ class PianoTilesGame:
                 if TRACK_X0 <= x <= TRACK_X1:
                     self.set_led(buffer, x, wy, t.color)
 
-    def _draw_text(self, buffer: bytearray, text: str, x0: int, y0: int,
-                   color: Tuple[int, int, int], scale: int = 1) -> int:
-        """Draw text using FONT_5x7. Returns x after last character."""
-        cx = x0
+    def _draw_text_rot(self, buffer: bytearray, text: str, y0: int,
+                       color: Tuple[int, int, int], scale: int = 1) -> int:
+        """Draw text rotated 90°: FONT_5x7 col→Y axis, row→X axis.
+        Readable from the short (X) end. Returns y after last character."""
+        # 7-row glyph spans 7*scale pixels in X, centered on the 16-wide board
+        x_off = (BOARD_WIDTH - 7 * scale) // 2
+        cy = y0
         for ch in text.upper():
             cols = _FONT_5x7.get(ch) or _FONT_5x7.get(' ', [0] * 5)
             for ci, col_byte in enumerate(cols):
@@ -691,128 +790,129 @@ class PianoTilesGame:
                     if col_byte & (1 << row):
                         for sr in range(scale):
                             for sc in range(scale):
-                                self.set_led(buffer,
-                                             cx + ci * scale + sc,
-                                             y0 + row * scale + sr,
-                                             color)
-            cx += (len(cols) + 1) * scale
-        return cx
+                                # row 0 (top) → large X (flipped like chase_game)
+                                bx = x_off + (6 - row) * scale + sr
+                                by = cy + ci * scale + sc
+                                self.set_led(buffer, bx, by, color)
+            cy += (len(cols) + 1) * scale
+        return cy
+
+    def _render_countdown(self, buffer: bytearray) -> None:
+        elapsed = time.time() - self.countdown_start
+        W, H = 16, 32
+        # Phase 0 (0-1s): full-board color pulse
+        if elapsed < 1.0:
+            t = elapsed
+            pulse = int(120 + 80 * abs(((t * 3) % 2) - 1))
+            colors = [(pulse, 0, pulse), (0, pulse, pulse), (pulse, pulse, 0)]
+            col = colors[int(t * 3) % len(colors)]
+            for y in range(H):
+                for x in range(W):
+                    self.set_led(buffer, x, y, col)
+            return
+        # Phases 1-3 (1-4s): big digits 3 / 2 / 1  — rotated: col→Y, row→X
+        # Each digit bitmap: 7 rows × 5 cols (row-major list of 5-element lists)
+        _DIGITS = {
+            '3': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[1,1,1,1,0]],
+            '2': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,1,0]],
+            '1': [[0,1,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,1,1,1,0]],
+        }
+        digit_map = {1.0: ('3', (255, 80, 80)), 2.0: ('2', (255, 220, 0)), 3.0: ('1', (0, 255, 120))}
+        digit, color = '3', (255, 80, 80)
+        for threshold, (d, c) in sorted(digit_map.items()):
+            if elapsed >= threshold:
+                digit, color = d, c
+        scale = 2
+        glyph = _DIGITS[digit]
+        # Rotated: rows span X (7*scale), cols span Y (5*scale)
+        x_span = 7 * scale
+        y_span = 5 * scale
+        x_off = (W - x_span) // 2
+        y_off = (H - y_span) // 2
+        for row_i, row in enumerate(glyph):
+            for col_i, bit in enumerate(row):
+                if bit:
+                    for sr in range(scale):
+                        for sc in range(scale):
+                            bx = x_off + (6 - row_i) * scale + sr
+                            by = y_off + col_i * scale + sc
+                            self.set_led(buffer, bx, by, color)
 
     def _render_victory_anim(self, buffer: bytearray) -> None:
         elapsed = time.time() - self.victory_start
         W, H = 16, 32
 
-        # ── Player accent colors ──────────────────────────────────────────
         PLAYER_COLORS = [
-            (255, 80,  80),   # P1 red
-            (80,  200, 255),  # P2 cyan
-            (80,  255, 120),  # P3 green
-            (255, 220, 60),   # P4 yellow
+            (255, 80,  80),
+            (80,  200, 255),
+            (80,  255, 120),
+            (255, 220, 60),
         ]
         win_color = PLAYER_COLORS[self.winner_slot % len(PLAYER_COLORS)]
+        # char width along Y per character at scale=1: (5+1)=6 px
+        CHAR_STEP = 6
 
-        # ── Phase 0 (0–2.5s): "NICE PLAYED!" sparkle ─────────────────────
-        if elapsed < 2.5:
+        # ── Phase 0 (0–2s): "NICE!" static, centered, sparkle bg ─────────
+        if elapsed < 2.0:
             t = elapsed
-            # Dark pulsing background
             bg = int(20 + 15 * abs(((t * 1.5) % 2) - 1))
             for y in range(H):
                 for x in range(W):
                     self.set_led(buffer, x, y, (0, bg, 0))
-            # Random sparkle dots
             rng = random.Random(int(t * 12))
-            for _ in range(12):
+            for _ in range(14):
                 sx = rng.randint(0, W - 1)
                 sy = rng.randint(0, H - 1)
                 br = rng.randint(80, 255)
                 self.set_led(buffer, sx, sy, (br, br, br))
-            # "NICE" top half, "PLAYED" bottom half (scrolls in from right)
-            scroll = max(0.0, 1.0 - t / 0.6)
-            x_nice   = int(scroll * W)
-            x_played = int(scroll * W)
-            self._draw_text(buffer, "NICE",   x_nice,   2,  (255, 255, 255))
-            self._draw_text(buffer, "PLAYED", x_played, 12, (200, 255, 200))
+            # "NICE!" = 5 chars * 6 = 30 px, centered in H=32 → y_start=1
+            self._draw_text_rot(buffer, "NICE!", (H - 5 * CHAR_STEP) // 2,
+                                (255, 255, 255))
             return
 
-        # ── Phase 1 (2.5–5s): "AND THE WINNER IS" rainbow scroll ─────────
+        # ── Phase 1 (2–5s): "WINNER" scrolls from bottom, rainbow bg ─────
         if elapsed < 5.0:
-            t = elapsed - 2.5
+            t = elapsed - 2.0
             for y in range(H):
                 for x in range(W):
                     hue = (x / W + y / H + t * 0.4) % 1.0
-                    r, g, b = _hsv_to_rgb(hue, 1.0, 0.35)
-                    self.set_led(buffer, x, y, (r, g, b))
-            # Two lines scroll in from right
-            scroll = max(0.0, 1.0 - t / 0.5)
-            x_off = int(scroll * W * 1.5)
-            self._draw_text(buffer, "AND THE",    x_off,  2,  (255, 255, 255))
-            self._draw_text(buffer, "WINNER IS",  x_off, 13,  (255, 255, 180))
+                    self.set_led(buffer, x, y, _hsv_to_rgb(hue, 1.0, 0.35))
+            # "WINNER" = 6 chars * 6 = 36 px; scroll from y=32 toward y=0
+            scroll_y = H - int(t * 14)   # 14 px/s
+            self._draw_text_rot(buffer, "WINNER", scroll_y, (255, 255, 255))
             return
 
-        # ── Phase 2 (5–7.5s): crazy ripple circles ────────────────────────
+        # ── Phase 2 (5–7.5s): ripple circles ─────────────────────────────
         if elapsed < 7.5:
             t = elapsed - 5.0
             cx_f, cy_f = W / 2.0, H / 2.0
             for y in range(H):
                 for x in range(W):
                     dist = ((x - cx_f) ** 2 + (y - cy_f) ** 2) ** 0.5
-                    # Multiple rings rippling outward
                     wave = 0.0
-                    for ring_speed, ring_hue_off in ((6.0, 0.0), (9.0, 0.33), (12.0, 0.66)):
-                        phase = (dist - t * ring_speed) * 0.35
-                        wave += 0.5 + 0.5 * (phase % 1.0 < 0.5 and 1 or -1)
+                    for speed, _ in ((6.0, 0.0), (9.0, 0.33), (12.0, 0.66)):
+                        phase = (dist - t * speed) * 0.35
+                        wave += 1.0 if (phase % 1.0) < 0.5 else 0.0
                     brightness = min(1.0, wave / 3.0)
                     hue = (dist / 20.0 + t * 0.25) % 1.0
-                    r, g, b = _hsv_to_rgb(hue, 1.0, brightness)
-                    self.set_led(buffer, x, y, (r, g, b))
+                    self.set_led(buffer, x, y, _hsv_to_rgb(hue, 1.0, brightness))
             return
 
-        # ── Phase 3 (7.5–11s): "P<N>" + "CONGRATS!" with flash bg ────────
+        # ── Phase 3 (7.5–11s): big "P<N>" + "CONGRATS" scrolling ────────
         t = elapsed - 7.5
-        flash = int(t * 6) % 2 == 0
-        bg_col = win_color if flash else (0, 0, 0)
+        flash = int(t * 5) % 2 == 0
+        dim_bg = tuple(v // 5 for v in win_color)
         for y in range(H):
             for x in range(W):
-                self.set_led(buffer, x, y, (bg_col[0] // 4, bg_col[1] // 4, bg_col[2] // 4))
+                self.set_led(buffer, x, y, dim_bg if flash else (0, 0, 0))
+        # "P1" at scale=2: 2 chars * 12 = 24 px, centered → y_start=4
         txt_col = (255, 255, 255) if flash else win_color
         player_str = f"P{self.winner_slot + 1}"
-        self._draw_text(buffer, player_str, 2,  2, txt_col, scale=2)
-        self._draw_text(buffer, "CONGRATS", 1, 18, (255, 220, 60))
-
-    def _render_countdown(self, buffer: bytearray) -> None:
-        elapsed = time.time() - self.countdown_start
-        # Phase 0 (0-1s): GET READY — pulse all LEDs through player colors
-        if elapsed < 1.0:
-            t = elapsed
-            pulse = int(120 + 80 * abs(((t * 3) % 2) - 1))
-            colors = [(pulse, 0, pulse), (0, pulse, pulse), (pulse, pulse, 0)]
-            col = colors[int(t * 3) % len(colors)]
-            for y in range(32):
-                for x in range(16):
-                    self.set_led(buffer, x, y, col)
-            return
-        # Phases 1-3 (1-4s): big digits 3, 2, 1
-        digit_map = {1.0: ('3', (255, 80, 80)),
-                     2.0: ('2', (255, 220, 0)),
-                     3.0: ('1', (0, 255, 120))}
-        digit, color = '3', (255, 80, 80)
-        for threshold, (d, c) in sorted(digit_map.items()):
-            if elapsed >= threshold:
-                digit, color = d, c
-        scale = 2
-        glyph = _COUNTDOWN_DIGITS[digit]
-        gw, gh = 5 * scale, 7 * scale
-        x_off = (16 - gw) // 2
-        y_off = (32 - gh) // 2
-        for row_i, row in enumerate(glyph):
-            for col_i, bit in enumerate(row):
-                if bit:
-                    for sr in range(scale):
-                        for sc in range(scale):
-                            self.set_led(buffer,
-                                         x_off + col_i * scale + sc,
-                                         y_off + row_i * scale + sr,
-                                         color)
+        self._draw_text_rot(buffer, player_str, (H - len(player_str) * 12) // 2,
+                            txt_col, scale=2)
+        # "CONGRATS" scrolls up from bottom
+        cg_y = H - int(t * 16)
+        self._draw_text_rot(buffer, "CONGRATS", cg_y, (255, 220, 60))
 
     def render(self) -> bytearray:
         buffer = bytearray(FRAME_DATA_LENGTH)
@@ -828,6 +928,10 @@ class PianoTilesGame:
 
             if self.state == "COUNTDOWN":
                 self._render_countdown(buffer)
+                return buffer
+
+            if self.state == "VICTORY_ANIM":
+                self._render_victory_anim(buffer)
                 return buffer
 
             self._draw_dividers(buffer)
@@ -1247,9 +1351,7 @@ class LobbyPanel:
         self.song_entries = song_entries
         self.root = root
 
-        BG   = "#0d1117"
-        CARD = "#161b22"
-        BORDER = "#30363d"
+        BG     = "#0d1117"
         MUTED  = "#8b949e"
         TEXT   = "#c9d1d9"
         ACCENT = "#58a6ff"
@@ -1259,59 +1361,42 @@ class LobbyPanel:
         self.win.configure(bg=BG)
         self.win.resizable(False, False)
 
-        hdr = tkfont.Font(family="Segoe UI", size=22, weight="bold")
-        lbl = tkfont.Font(family="Segoe UI", size=11)
+        hdr   = tkfont.Font(family="Segoe UI", size=22, weight="bold")
+        lbl   = tkfont.Font(family="Segoe UI", size=11)
         btn_f = tkfont.Font(family="Segoe UI", size=13, weight="bold")
-
-        pad = dict(padx=18, pady=10)
 
         tk.Label(self.win, text="🎹  PIANO TILES", font=hdr, fg=ACCENT, bg=BG).pack(pady=(20, 6))
         tk.Label(self.win, text="Choose options then press START", font=lbl, fg=MUTED, bg=BG).pack(pady=(0, 16))
 
         # Players
-        pf = tk.LabelFrame(self.win, text="  Players  ", fg=MUTED, bg=BG,
-                           highlightbackground=BORDER, font=lbl)
-        pf.pack(fill=tk.X, padx=20, pady=(0, 10))
-        self.var_players = tk.IntVar(value=1)
-        prow = tk.Frame(pf, bg=BG)
-        prow.pack(pady=6)
-        rb_kw = dict(bg=BG, fg=TEXT, selectcolor="#484f58", activebackground=BG,
-                     font=lbl, highlightthickness=0)
-        for n in range(1, NUM_PLAYER_SLOTS + 1):
-            tk.Radiobutton(prow, text=f"{n}P", variable=self.var_players,
-                           value=n, **rb_kw).pack(side=tk.LEFT, padx=10)
+        tk.Label(self.win, text="Players", font=lbl, fg=TEXT, bg=BG).pack()
+        self.var_players = tk.StringVar(value="1")
+        pf = tk.Frame(self.win, bg=BG)
+        pf.pack(pady=4)
+        for n in (1, 2, 3, 4):
+            tk.Radiobutton(pf, text=f"{n}P", variable=self.var_players, value=str(n),
+                           font=lbl, fg=TEXT, bg=BG, selectcolor=BG,
+                           activebackground=BG, activeforeground=ACCENT).pack(side="left", padx=8)
 
-        # Songs
-        sf = tk.LabelFrame(self.win, text="  Song  ", fg=MUTED, bg=BG,
-                           highlightbackground=BORDER, font=lbl)
-        sf.pack(fill=tk.X, padx=20, pady=(0, 16))
-        self.var_song = tk.IntVar(value=0)
+        # Song
+        tk.Label(self.win, text="Song", font=lbl, fg=TEXT, bg=BG).pack(pady=(12, 0))
+        self.var_song = tk.StringVar(value="0")
+        sf = tk.Frame(self.win, bg=BG)
+        sf.pack(pady=4)
         for i, (_, title) in enumerate(song_entries):
-            tk.Radiobutton(sf, text=title, variable=self.var_song, value=i,
-                           **rb_kw).pack(anchor=tk.W, padx=12, pady=2)
+            tk.Radiobutton(sf, text=title, variable=self.var_song, value=str(i),
+                           font=lbl, fg=TEXT, bg=BG, selectcolor=BG,
+                           activebackground=BG, activeforeground=ACCENT).pack(anchor="w", padx=16)
 
-        # Start
-        self.btn_start = tk.Button(
-            self.win, text="▶  START", font=btn_f,
-            bg="#238636", fg="white", activebackground="#2ea043",
-            activeforeground="white", relief=tk.FLAT, bd=0,
-            padx=30, pady=12, cursor="hand2",
-            command=self._start,
-        )
-        self.btn_start.pack(pady=(0, 20))
+        self._status_lbl = tk.Label(self.win, text="", font=lbl, fg=ACCENT, bg=BG)
+        self._status_lbl.pack(pady=(12, 4))
 
-        self.win.protocol("WM_DELETE_WINDOW", lambda: root.quit())
+        self.btn_start = tk.Button(self.win, text="▶  START", font=btn_f,
+                                   bg=ACCENT, fg="#0d1117", relief="flat",
+                                   padx=20, pady=8, command=self._start)
+        self.btn_start.pack(pady=(4, 20))
 
-        # Center window
-        self.win.update_idletasks()
-        sw = self.win.winfo_screenwidth()
-        sh = self.win.winfo_screenheight()
-        w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
-        self.win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-
-        self._status_lbl = tk.Label(self.win, text="", font=lbl, fg="#ffc837", bg=BG)
-        self._status_lbl.pack(pady=(0, 8))
-        self._tick()
+        self.win.after(100, self._tick)
 
     def _start(self) -> None:
         n = int(self.var_players.get())
@@ -1319,6 +1404,7 @@ class LobbyPanel:
         chart, title = self.song_entries[si]
         self.game.chart_file_override  = chart
         self.game.chart_title_override = title
+        self.game.music_file = chart.replace(".json", ".mp3")
         self.game.start_game(n)
         self.btn_start.config(state="disabled")
 
@@ -1337,7 +1423,7 @@ class LobbyPanel:
         elif state == "PLAYING":
             self._status_lbl.config(text="♪ Playing!")
             self.btn_start.config(state="normal")
-        elif state == "ENDED":
+        elif state in ("ENDED", "VICTORY_ANIM"):
             self._status_lbl.config(text="Song finished!")
             self.btn_start.config(state="normal")
         else:
@@ -1355,10 +1441,10 @@ def main() -> None:
         print("No songs found in", catalog_path)
         return
 
-    pygame.mixer.init()
+    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+    pygame.mixer.set_num_channels(16)
 
     game = PianoTilesGame()
-    # Store music file so tick() can start it after countdown
     game.music_file = os.path.join(_SCRIPT_DIR, "song_charts", "test.mp3")
     game.state = "LOBBY"
 
