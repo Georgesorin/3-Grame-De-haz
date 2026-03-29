@@ -2,5 +2,5 @@
   "format": 2,
   "comment": "Setup menu reads this file. Use songs[] to list charts (paths relative to this file). Omit songs and put tiles here for a single-chart file.",
   "songs": [
-    { "file": "song_charts/test.json", "songName": "TestSong", "music": "song_charts/test.mp3" }]
+    { "file": "song_charts/minune.json", "songName": "Minune", "music": "song_charts/minune.mp3" }]
 }

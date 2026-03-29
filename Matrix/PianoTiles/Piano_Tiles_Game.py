@@ -265,7 +265,7 @@ TILE_MIN_WIDTH = 1
 TILE_MAX_WIDTH = 10
 # width >= this: score every tick while key held and tile overlaps key column; else one tap score.
 LONG_TILE_THRESHOLD = 4
-SCROLL_SPEED = 10
+SCROLL_SPEED = 5
 SPAWN_MIN_INTERVAL = 0.45
 SPAWN_MAX_INTERVAL = 1.15
 TAP_SCORE = 25
@@ -345,7 +345,7 @@ def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
 
     songs = data.get("songs")
     if isinstance(songs, list) and songs:
-        out: List[Tuple[str, str]] = []
+        out: List[Tuple[str, str, str]] = []
         for item in songs:
             if not isinstance(item, dict):
                 continue
@@ -368,7 +368,14 @@ def load_song_catalog_entries(catalog_path: str) -> List[Tuple[str, str]]:
                 title = read_song_title_from_chart(chart_path)
             if not title:
                 title = os.path.basename(chart_path)
-            out.append((chart_path, title.strip()))
+            # Resolve music path from catalog entry; fall back to chart .json → .mp3
+            music_rel = item.get("music") or item.get("audio") or item.get("mp3")
+            if isinstance(music_rel, str) and music_rel.strip():
+                music_rel = music_rel.strip().replace("\\", "/")
+                music_path = music_rel if os.path.isabs(music_rel) else os.path.normpath(os.path.join(base_dir, music_rel))
+            else:
+                music_path = chart_path.replace(".json", ".mp3")
+            out.append((chart_path, title.strip(), music_path))
         return out
 
     if isinstance(data.get("tiles"), list):
@@ -512,6 +519,9 @@ class PianoTilesGame:
     chart_title_override: Optional[str] = None
     countdown_start: float = 0.0
     music_file: str = ""
+    music_duration: float = 0.0    # seconds; 0 = unknown
+    _music_started: bool = False    # True once music has been playing for at least 1 tick
+    _finale_spawned: bool = False   # True once the ending tiles are placed
     victory_start: float = 0.0
     winner_slot: int = 0
     _victory_sounds_done: Set[int] = field(default_factory=set)
@@ -586,6 +596,9 @@ class PianoTilesGame:
             self._reload_chart()
             self.chart_next_index = 0
             self._song_end_message_printed = False
+            self.music_duration = 0.0
+            self._music_started = False
+            self._finale_spawned = False
             self.countdown_start = time.time()
             self._victory_sounds_done = set()
             self.state = "COUNTDOWN"
@@ -721,8 +734,9 @@ class PianoTilesGame:
                         try:
                             pygame.mixer.music.load(self.music_file)
                             pygame.mixer.music.play(0)
+                            self.music_duration = pygame.mixer.music.get_length()
                         except Exception:
-                            pass
+                            self.music_duration = 0.0
                 return
             if self.state == "VICTORY_ANIM":
                 elapsed = time.time() - self.victory_start
@@ -746,12 +760,42 @@ class PianoTilesGame:
 
             if self.chart_events:
                 elapsed = now - self.chart_origin_time
-                while self.chart_next_index < len(self.chart_events):
-                    ev = self.chart_events[self.chart_next_index]
-                    if ev.t > elapsed:
-                        break
-                    self._spawn_chart_wave(ev)
-                    self.chart_next_index += 1
+
+                # Track that music has been running for at least one tick
+                if self.music_file and not self._music_started and elapsed > 1.0:
+                    self._music_started = True
+
+                # Finale trigger: 5 s before known end OR music stopped unexpectedly
+                music_stopped = (
+                    self._music_started
+                    and self.music_file
+                    and not pygame.mixer.music.get_busy()
+                )
+                near_end = (
+                    self.music_duration > 0
+                    and elapsed >= self.music_duration - 5.0
+                )
+                if not self._finale_spawned and (near_end or music_stopped):
+                    self._finale_spawned = True
+                    self.chart_next_index = len(self.chart_events)
+                    self.tiles.clear()
+                    for slot in range(self.num_players):
+                        for final_row in (2, 3):
+                            self.tiles.append(MovingTile(
+                                slot=slot,
+                                row_in_lane=final_row,
+                                x=float(BOARD_WIDTH),
+                                width=7,
+                                color=TARGET_PALETTE[final_row],
+                            ))
+
+                elif not self._finale_spawned:
+                    while self.chart_next_index < len(self.chart_events):
+                        ev = self.chart_events[self.chart_next_index]
+                        if ev.t > elapsed:
+                            break
+                        self._spawn_chart_wave(ev)
+                        self.chart_next_index += 1
             elif now >= self.next_spawn_time:
                 self._spawn_tile()
                 self.next_spawn_time = now + self._random_spawn_delay()
@@ -1455,7 +1499,7 @@ class LobbyPanel:
         self.var_song = tk.StringVar(value="0")
         sf = tk.Frame(self.win, bg=BG)
         sf.pack(pady=4)
-        for i, (_, title) in enumerate(song_entries):
+        for i, (_, title, __) in enumerate(song_entries):
             tk.Radiobutton(sf, text=title, variable=self.var_song, value=str(i),
                            font=lbl, fg=TEXT, bg=BG, selectcolor=BG,
                            activebackground=BG, activeforeground=ACCENT).pack(anchor="w", padx=16)
@@ -1473,10 +1517,10 @@ class LobbyPanel:
     def _start(self) -> None:
         n = int(self.var_players.get())
         si = int(self.var_song.get())
-        chart, title = self.song_entries[si]
+        chart, title, music = self.song_entries[si]
         self.game.chart_file_override  = chart
         self.game.chart_title_override = title
-        self.game.music_file = chart.replace(".json", ".mp3")
+        self.game.music_file = music
         self.game.start_game(n)
         self.btn_start.config(state="disabled")
 
