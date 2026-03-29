@@ -17,7 +17,7 @@ import json
 import math
 import mido
 
-mid = mido.MidiFile(r"C:\Users\bmdma\ledhack\3-Grame-De-haz\Matrix\songs\Fly-Me-To-The-Moon.mid")
+mid = mido.MidiFile(r"C:\Users\bmdma\ledhack\3-Grame-De-haz\Matrix\songs\Pirates of the Caribbean - He's a Pirate (2).mid")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 OUTPUT_FILE    = r"C:\Users\bmdma\ledhack\3-Grame-De-haz\Matrix\songs\song.json"
