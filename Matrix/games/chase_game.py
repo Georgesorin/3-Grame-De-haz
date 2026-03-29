@@ -200,7 +200,7 @@ class ChaseGame:
         self.on_game_event = on_game_event or (lambda *_: None)
 
         dp = difficulty_params or {}
-        self._base_period   = dp.get("base_period", 0.07)
+        self._base_period   = dp.get("base_period", 0.15)
         self._start_lives   = dp.get("lives", 3)
         self._snakes_bonus  = dp.get("snakes_bonus", 0)
 
@@ -358,19 +358,14 @@ class ChaseGame:
                                  max(0, min(255, g)),
                                  max(0, min(255, b)))
 
-        # Text: rapid white flicker over the rainbow background
-        flicker = 0.65 + 0.35 * abs(math.sin(t * 20))
-        white   = int(255 * flicker)
-        gold    = int(210 * flicker)
-
         lvl_str = str(self._level)
         lh_lvl  = _text_rot_height("LEVEL")
         lh_num  = _text_rot_height(lvl_str)
         gap     = 3
         blk_h   = lh_lvl + gap + lh_num
         y0      = max(1, (BOARD_HEIGHT - blk_h) // 2)
-        _draw_text_rot(frame, "LEVEL", y0,                (white, white, white))
-        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, (white, gold,  0))
+        _draw_text_rot(frame, "LEVEL", y0,                BLACK)
+        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, BLACK)
         return frame
 
     def _frame_game_over_anim(self, now: float) -> dict:
@@ -690,7 +685,7 @@ class ChaseGame:
         period = self._base_period
         if now < self._slow_until:
             period *= 1.75
-        period *= max(0.6, 1.0 - min(0.4, (self._level - 1) * 0.045))
+        period *= max(0.65, 1.0 - min(0.35, (self._level - 1) * 0.035))
         if now < self._snake_step_at:
             return
         self._snake_step_at = now + period
@@ -919,14 +914,22 @@ class ChaseGame:
                 min(255, base[2]),
             )
 
-        # Freeze border
+        # Freeze border — flashes faster as it nears expiry
         if now < self._freeze_until:
-            edge = (120, 200, 255)
-            for x in range(BOARD_WIDTH):
-                frame[(x, 0)]               = edge
-                frame[(x, BOARD_HEIGHT-1)]  = edge
-            for y in range(BOARD_HEIGHT):
-                frame[(0, y)]               = edge
-                frame[(BOARD_WIDTH-1, y)]   = edge
+            remaining = self._freeze_until - now
+            if remaining > 3.0:
+                show = True
+            else:
+                # flash frequency ramps from 2 Hz → 8 Hz in the last 3 s
+                freq = 2.0 + (3.0 - remaining) * 2.0
+                show = int(now * freq * 2) % 2 == 0
+            if show:
+                edge = (120, 200, 255)
+                for x in range(BOARD_WIDTH):
+                    frame[(x, 0)]              = edge
+                    frame[(x, BOARD_HEIGHT-1)] = edge
+                for y in range(BOARD_HEIGHT):
+                    frame[(0, y)]              = edge
+                    frame[(BOARD_WIDTH-1, y)]  = edge
 
         return frame

@@ -403,10 +403,10 @@ class MatrixGUI:
         if self.active_game:
             self.active_game.stop()
         diff_params = {
-            "Easy":   {"base_period": 0.09,  "lives": 3, "snakes_bonus": -1},
-            "Normal": {"base_period": 0.055, "lives": 3, "snakes_bonus": 0},
-            "Hard":   {"base_period": 0.035, "lives": 2, "snakes_bonus": 1},
-            "Insane": {"base_period": 0.02,  "lives": 1, "snakes_bonus": 2},
+            "Easy":   {"base_period": 0.20,  "lives": 5, "snakes_bonus": -1},
+            "Normal": {"base_period": 0.12,  "lives": 3, "snakes_bonus": 0},
+            "Hard":   {"base_period": 0.07,  "lives": 2, "snakes_bonus": 1},
+            "Insane": {"base_period": 0.04,  "lives": 1, "snakes_bonus": 2},
         }.get(difficulty, {})
         self.active_game = ChaseGame(
             on_game_event=self._on_chase_event,
