@@ -14,15 +14,15 @@ BOARD_HEIGHT = 32
 # ── Palette ────────────────────────────────────────────────────────────────────
 CHASE_WATER          = (5,   42,  95)
 CHASE_SHOAL          = (35,  105, 125)
-CHASE_ISLAND_COAST   = (130, 168, 88)
-CHASE_ISLAND_MID     = (52,  128, 62)
-CHASE_ISLAND_INLAND  = (28,  88,  48)
+CHASE_ISLAND_COAST   = (15,  50,  10)
+CHASE_ISLAND_MID     = (8,   28,  6)
+CHASE_ISLAND_INLAND  = (3,   14,  3)
 CHASE_TREASURE       = (255, 200, 55)
 CHASE_PLAYER         = (0,   245, 220)
 CHASE_PLAYER_SHIELD  = (70,  190, 255)
 CHASE_ENEMY_HEAD     = (255, 50,  50)
 CHASE_ENEMY_BODY     = (180, 20,  30)
-CHASE_PU_FREEZE      = (170, 230, 255)
+CHASE_PU_FREEZE      = (255, 130, 0)
 CHASE_PU_SLOW        = (255, 140, 60)
 CHASE_PU_SHIELD      = (255, 255, 140)
 BLACK                = (0,   0,   0)
@@ -200,7 +200,7 @@ class ChaseGame:
         self.on_game_event = on_game_event or (lambda *_: None)
 
         dp = difficulty_params or {}
-        self._base_period   = dp.get("base_period", 0.07)
+        self._base_period   = dp.get("base_period", 0.18)
         self._start_lives   = dp.get("lives", 3)
         self._snakes_bonus  = dp.get("snakes_bonus", 0)
 
@@ -358,19 +358,14 @@ class ChaseGame:
                                  max(0, min(255, g)),
                                  max(0, min(255, b)))
 
-        # Text: rapid white flicker over the rainbow background
-        flicker = 0.65 + 0.35 * abs(math.sin(t * 20))
-        white   = int(255 * flicker)
-        gold    = int(210 * flicker)
-
         lvl_str = str(self._level)
         lh_lvl  = _text_rot_height("LEVEL")
         lh_num  = _text_rot_height(lvl_str)
         gap     = 3
         blk_h   = lh_lvl + gap + lh_num
         y0      = max(1, (BOARD_HEIGHT - blk_h) // 2)
-        _draw_text_rot(frame, "LEVEL", y0,                (white, white, white))
-        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, (white, gold,  0))
+        _draw_text_rot(frame, "LEVEL", y0,                BLACK)
+        _draw_text_rot(frame, lvl_str, y0 + lh_lvl + gap, BLACK)
         return frame
 
     def _frame_game_over_anim(self, now: float) -> dict:
@@ -919,14 +914,22 @@ class ChaseGame:
                 min(255, base[2]),
             )
 
-        # Freeze border
+        # Freeze border — flickers faster as it nears expiry
         if now < self._freeze_until:
-            edge = (120, 200, 255)
-            for x in range(BOARD_WIDTH):
-                frame[(x, 0)]               = edge
-                frame[(x, BOARD_HEIGHT-1)]  = edge
-            for y in range(BOARD_HEIGHT):
-                frame[(0, y)]               = edge
-                frame[(BOARD_WIDTH-1, y)]   = edge
+            remaining = self._freeze_until - now
+            if remaining > 3.0:
+                show = True
+            else:
+                # ramps from 2 Hz → 10 Hz in the last 3 seconds
+                freq = 2.0 + (3.0 - remaining) * (8.0 / 3.0)
+                show = int(now * freq * 2) % 2 == 0
+            if show:
+                edge = (255, 130, 0)
+                for x in range(BOARD_WIDTH):
+                    frame[(x, 0)]              = edge
+                    frame[(x, BOARD_HEIGHT-1)] = edge
+                for y in range(BOARD_HEIGHT):
+                    frame[(0, y)]              = edge
+                    frame[(BOARD_WIDTH-1, y)]  = edge
 
         return frame

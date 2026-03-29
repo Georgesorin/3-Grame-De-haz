@@ -11,6 +11,15 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Tuple
 
+# Import 5×7 pixel font from parent Matrix directory
+_MATRIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
+try:
+    from matrix_font import FONT_5x7 as _FONT_5x7  # type: ignore
+except ImportError:
+    _FONT_5x7 = {}  # fallback: no text rendered
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -88,6 +97,13 @@ TARGET_PALETTE: Tuple[Tuple[int, int, int], ...] = (
     MAGENTA,
     ORANGE,
 )
+
+# 5-col × 7-row pixel bitmaps for countdown digits (scale ×2 → 10×14, centered in 16×32)
+_COUNTDOWN_DIGITS = {
+    '3': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[1,1,1,1,0]],
+    '2': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,1,0]],
+    '1': [[0,1,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,1,1,1,0]],
+}
 
 ROW_NAME_TO_INDEX = {
     "red": 0,
@@ -347,6 +363,10 @@ class PianoTilesGame:
     chart_file_override: Optional[str] = None
     # Title from piano_tiles_chart.json manifest (songs[].songName); wins over leaf chart file.
     chart_title_override: Optional[str] = None
+    countdown_start: float = 0.0
+    music_file: str = ""
+    victory_start: float = 0.0
+    winner_slot: int = 0
 
     def _active_chart_path(self) -> str:
         if self.chart_file_override:
@@ -417,11 +437,9 @@ class PianoTilesGame:
             self.tiles.clear()
             self._reload_chart()
             self.chart_next_index = 0
-            self.chart_origin_time = time.time()
-            self.next_spawn_time = time.time()
-            self.last_tick = time.time()
             self._song_end_message_printed = False
-            self.state = "PLAYING"
+            self.countdown_start = time.time()
+            self.state = "COUNTDOWN"
 
     def reset(self) -> None:
         with self.lock:
@@ -539,6 +557,23 @@ class PianoTilesGame:
 
     def tick(self) -> None:
         with self.lock:
+            if self.state == "COUNTDOWN":
+                if time.time() - self.countdown_start >= 4.0:
+                    self.chart_origin_time = time.time()
+                    self.next_spawn_time   = time.time()
+                    self.last_tick         = time.time()
+                    self.state = "PLAYING"
+                    if self.music_file:
+                        try:
+                            pygame.mixer.music.load(self.music_file)
+                            pygame.mixer.music.play()
+                        except Exception:
+                            pass
+                return
+            if self.state == "VICTORY_ANIM":
+                if time.time() - self.victory_start >= 11.0:
+                    self.state = "ENDED"
+                return
             if self.state != "PLAYING":
                 return
 
@@ -578,13 +613,15 @@ class PianoTilesGame:
                 and self.chart_next_index >= len(self.chart_events)
                 and not self.tiles
             ):
-                self.state = "ENDED"
+                self.state = "VICTORY_ANIM"
+                self.victory_start = time.time()
+                if self.players:
+                    self.winner_slot = max(self.players, key=lambda p: p.score).slot
+                else:
+                    self.winner_slot = 0
                 if not self._song_end_message_printed:
                     self._song_end_message_printed = True
-                    print(
-                        "\nSong finished. Game stopped (ENDED). "
-                        "Use 'scores' or 'start <1-4>' — at the prompt, q or Esc exits."
-                    )
+                    print(f"\nSong finished! Winner: Player {self.winner_slot + 1}")
 
             for i in range(64):
                 self.prev_button_states[i] = self.button_states[i]
@@ -643,6 +680,140 @@ class PianoTilesGame:
                 if TRACK_X0 <= x <= TRACK_X1:
                     self.set_led(buffer, x, wy, t.color)
 
+    def _draw_text(self, buffer: bytearray, text: str, x0: int, y0: int,
+                   color: Tuple[int, int, int], scale: int = 1) -> int:
+        """Draw text using FONT_5x7. Returns x after last character."""
+        cx = x0
+        for ch in text.upper():
+            cols = _FONT_5x7.get(ch) or _FONT_5x7.get(' ', [0] * 5)
+            for ci, col_byte in enumerate(cols):
+                for row in range(7):
+                    if col_byte & (1 << row):
+                        for sr in range(scale):
+                            for sc in range(scale):
+                                self.set_led(buffer,
+                                             cx + ci * scale + sc,
+                                             y0 + row * scale + sr,
+                                             color)
+            cx += (len(cols) + 1) * scale
+        return cx
+
+    def _render_victory_anim(self, buffer: bytearray) -> None:
+        elapsed = time.time() - self.victory_start
+        W, H = 16, 32
+
+        # ── Player accent colors ──────────────────────────────────────────
+        PLAYER_COLORS = [
+            (255, 80,  80),   # P1 red
+            (80,  200, 255),  # P2 cyan
+            (80,  255, 120),  # P3 green
+            (255, 220, 60),   # P4 yellow
+        ]
+        win_color = PLAYER_COLORS[self.winner_slot % len(PLAYER_COLORS)]
+
+        # ── Phase 0 (0–2.5s): "NICE PLAYED!" sparkle ─────────────────────
+        if elapsed < 2.5:
+            t = elapsed
+            # Dark pulsing background
+            bg = int(20 + 15 * abs(((t * 1.5) % 2) - 1))
+            for y in range(H):
+                for x in range(W):
+                    self.set_led(buffer, x, y, (0, bg, 0))
+            # Random sparkle dots
+            rng = random.Random(int(t * 12))
+            for _ in range(12):
+                sx = rng.randint(0, W - 1)
+                sy = rng.randint(0, H - 1)
+                br = rng.randint(80, 255)
+                self.set_led(buffer, sx, sy, (br, br, br))
+            # "NICE" top half, "PLAYED" bottom half (scrolls in from right)
+            scroll = max(0.0, 1.0 - t / 0.6)
+            x_nice   = int(scroll * W)
+            x_played = int(scroll * W)
+            self._draw_text(buffer, "NICE",   x_nice,   2,  (255, 255, 255))
+            self._draw_text(buffer, "PLAYED", x_played, 12, (200, 255, 200))
+            return
+
+        # ── Phase 1 (2.5–5s): "AND THE WINNER IS" rainbow scroll ─────────
+        if elapsed < 5.0:
+            t = elapsed - 2.5
+            for y in range(H):
+                for x in range(W):
+                    hue = (x / W + y / H + t * 0.4) % 1.0
+                    r, g, b = _hsv_to_rgb(hue, 1.0, 0.35)
+                    self.set_led(buffer, x, y, (r, g, b))
+            # Two lines scroll in from right
+            scroll = max(0.0, 1.0 - t / 0.5)
+            x_off = int(scroll * W * 1.5)
+            self._draw_text(buffer, "AND THE",    x_off,  2,  (255, 255, 255))
+            self._draw_text(buffer, "WINNER IS",  x_off, 13,  (255, 255, 180))
+            return
+
+        # ── Phase 2 (5–7.5s): crazy ripple circles ────────────────────────
+        if elapsed < 7.5:
+            t = elapsed - 5.0
+            cx_f, cy_f = W / 2.0, H / 2.0
+            for y in range(H):
+                for x in range(W):
+                    dist = ((x - cx_f) ** 2 + (y - cy_f) ** 2) ** 0.5
+                    # Multiple rings rippling outward
+                    wave = 0.0
+                    for ring_speed, ring_hue_off in ((6.0, 0.0), (9.0, 0.33), (12.0, 0.66)):
+                        phase = (dist - t * ring_speed) * 0.35
+                        wave += 0.5 + 0.5 * (phase % 1.0 < 0.5 and 1 or -1)
+                    brightness = min(1.0, wave / 3.0)
+                    hue = (dist / 20.0 + t * 0.25) % 1.0
+                    r, g, b = _hsv_to_rgb(hue, 1.0, brightness)
+                    self.set_led(buffer, x, y, (r, g, b))
+            return
+
+        # ── Phase 3 (7.5–11s): "P<N>" + "CONGRATS!" with flash bg ────────
+        t = elapsed - 7.5
+        flash = int(t * 6) % 2 == 0
+        bg_col = win_color if flash else (0, 0, 0)
+        for y in range(H):
+            for x in range(W):
+                self.set_led(buffer, x, y, (bg_col[0] // 4, bg_col[1] // 4, bg_col[2] // 4))
+        txt_col = (255, 255, 255) if flash else win_color
+        player_str = f"P{self.winner_slot + 1}"
+        self._draw_text(buffer, player_str, 2,  2, txt_col, scale=2)
+        self._draw_text(buffer, "CONGRATS", 1, 18, (255, 220, 60))
+
+    def _render_countdown(self, buffer: bytearray) -> None:
+        elapsed = time.time() - self.countdown_start
+        # Phase 0 (0-1s): GET READY — pulse all LEDs through player colors
+        if elapsed < 1.0:
+            t = elapsed
+            pulse = int(120 + 80 * abs(((t * 3) % 2) - 1))
+            colors = [(pulse, 0, pulse), (0, pulse, pulse), (pulse, pulse, 0)]
+            col = colors[int(t * 3) % len(colors)]
+            for y in range(32):
+                for x in range(16):
+                    self.set_led(buffer, x, y, col)
+            return
+        # Phases 1-3 (1-4s): big digits 3, 2, 1
+        digit_map = {1.0: ('3', (255, 80, 80)),
+                     2.0: ('2', (255, 220, 0)),
+                     3.0: ('1', (0, 255, 120))}
+        digit, color = '3', (255, 80, 80)
+        for threshold, (d, c) in sorted(digit_map.items()):
+            if elapsed >= threshold:
+                digit, color = d, c
+        scale = 2
+        glyph = _COUNTDOWN_DIGITS[digit]
+        gw, gh = 5 * scale, 7 * scale
+        x_off = (16 - gw) // 2
+        y_off = (32 - gh) // 2
+        for row_i, row in enumerate(glyph):
+            for col_i, bit in enumerate(row):
+                if bit:
+                    for sr in range(scale):
+                        for sc in range(scale):
+                            self.set_led(buffer,
+                                         x_off + col_i * scale + sc,
+                                         y_off + row_i * scale + sr,
+                                         color)
+
     def render(self) -> bytearray:
         buffer = bytearray(FRAME_DATA_LENGTH)
         with self.lock:
@@ -653,6 +824,10 @@ class PianoTilesGame:
             if self.state == "LOBBY":
                 for x in range(BOARD_WIDTH):
                     self.set_led(buffer, x, 14, GRAY_BRIGHT)
+                return buffer
+
+            if self.state == "COUNTDOWN":
+                self._render_countdown(buffer)
                 return buffer
 
             self._draw_dividers(buffer)
@@ -1062,87 +1237,177 @@ def terminal_menu_select(title: str, options: List[str]) -> int:
             raise KeyboardInterrupt
 
 
+class LobbyPanel:
+    """Tkinter lobby window: select players + song, then start."""
+
+    def __init__(self, game: PianoTilesGame, song_entries: list, root) -> None:
+        import tkinter as tk
+        from tkinter import font as tkfont
+        self.game = game
+        self.song_entries = song_entries
+        self.root = root
+
+        BG   = "#0d1117"
+        CARD = "#161b22"
+        BORDER = "#30363d"
+        MUTED  = "#8b949e"
+        TEXT   = "#c9d1d9"
+        ACCENT = "#58a6ff"
+
+        self.win = tk.Toplevel(root)
+        self.win.title("Piano Tiles — Lobby")
+        self.win.configure(bg=BG)
+        self.win.resizable(False, False)
+
+        hdr = tkfont.Font(family="Segoe UI", size=22, weight="bold")
+        lbl = tkfont.Font(family="Segoe UI", size=11)
+        btn_f = tkfont.Font(family="Segoe UI", size=13, weight="bold")
+
+        pad = dict(padx=18, pady=10)
+
+        tk.Label(self.win, text="🎹  PIANO TILES", font=hdr, fg=ACCENT, bg=BG).pack(pady=(20, 6))
+        tk.Label(self.win, text="Choose options then press START", font=lbl, fg=MUTED, bg=BG).pack(pady=(0, 16))
+
+        # Players
+        pf = tk.LabelFrame(self.win, text="  Players  ", fg=MUTED, bg=BG,
+                           highlightbackground=BORDER, font=lbl)
+        pf.pack(fill=tk.X, padx=20, pady=(0, 10))
+        self.var_players = tk.IntVar(value=1)
+        prow = tk.Frame(pf, bg=BG)
+        prow.pack(pady=6)
+        rb_kw = dict(bg=BG, fg=TEXT, selectcolor="#484f58", activebackground=BG,
+                     font=lbl, highlightthickness=0)
+        for n in range(1, NUM_PLAYER_SLOTS + 1):
+            tk.Radiobutton(prow, text=f"{n}P", variable=self.var_players,
+                           value=n, **rb_kw).pack(side=tk.LEFT, padx=10)
+
+        # Songs
+        sf = tk.LabelFrame(self.win, text="  Song  ", fg=MUTED, bg=BG,
+                           highlightbackground=BORDER, font=lbl)
+        sf.pack(fill=tk.X, padx=20, pady=(0, 16))
+        self.var_song = tk.IntVar(value=0)
+        for i, (_, title) in enumerate(song_entries):
+            tk.Radiobutton(sf, text=title, variable=self.var_song, value=i,
+                           **rb_kw).pack(anchor=tk.W, padx=12, pady=2)
+
+        # Start
+        self.btn_start = tk.Button(
+            self.win, text="▶  START", font=btn_f,
+            bg="#238636", fg="white", activebackground="#2ea043",
+            activeforeground="white", relief=tk.FLAT, bd=0,
+            padx=30, pady=12, cursor="hand2",
+            command=self._start,
+        )
+        self.btn_start.pack(pady=(0, 20))
+
+        self.win.protocol("WM_DELETE_WINDOW", lambda: root.quit())
+
+        # Center window
+        self.win.update_idletasks()
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+        self.win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        self._status_lbl = tk.Label(self.win, text="", font=lbl, fg="#ffc837", bg=BG)
+        self._status_lbl.pack(pady=(0, 8))
+        self._tick()
+
+    def _start(self) -> None:
+        n = int(self.var_players.get())
+        si = int(self.var_song.get())
+        chart, title = self.song_entries[si]
+        self.game.chart_file_override  = chart
+        self.game.chart_title_override = title
+        self.game.start_game(n)
+        self.btn_start.config(state="disabled")
+
+    def _tick(self) -> None:
+        import tkinter as tk
+        with self.game.lock:
+            state    = self.game.state
+            cd_start = self.game.countdown_start
+        if state == "COUNTDOWN":
+            elapsed = time.time() - cd_start
+            remaining = max(0, 4.0 - elapsed)
+            if elapsed < 1.0:
+                self._status_lbl.config(text="GET READY!")
+            else:
+                self._status_lbl.config(text=f"The song starts in:  {int(remaining) + 1}")
+        elif state == "PLAYING":
+            self._status_lbl.config(text="♪ Playing!")
+            self.btn_start.config(state="normal")
+        elif state == "ENDED":
+            self._status_lbl.config(text="Song finished!")
+            self.btn_start.config(state="normal")
+        else:
+            self._status_lbl.config(text="")
+        self.win.after(100, self._tick)
+
+
 def main() -> None:
+    import tkinter as tk
+    import platform
+
     catalog_path = _chart_path_from_config()
     song_entries = load_song_catalog_entries(catalog_path)
     if not song_entries:
         print("No songs found in", catalog_path)
-        print("Add a songs[] list or a legacy chart with top-level tiles.")
         return
 
-    try:
-        player_labels = [f"{n} player{'s' if n != 1 else ''}" for n in range(1, NUM_PLAYER_SLOTS + 1)]
-        pi = terminal_menu_select("Number of players", player_labels)
-        num_players = pi + 1
-        song_labels = [t for _, t in song_entries]
-        si = terminal_menu_select("Song", song_labels)
-        selected_chart = song_entries[si][0]
-    except KeyboardInterrupt:
-        print("\nCancelled.")
-        return
-
-    print()
+    pygame.mixer.init()
 
     game = PianoTilesGame()
-    game.chart_file_override = selected_chart
-    game.chart_title_override = song_entries[si][1]
+    # Store music file so tick() can start it after countdown
+    game.music_file = os.path.join(_SCRIPT_DIR, "song_charts", "test.mp3")
     game.state = "LOBBY"
-    game.start_game(num_players)
-    pygame.mixer.init()
-    pygame.mixer.music.load("./Matrix/PianoTiles/song_charts/test.mp3")
-    pygame.mixer.music.play()
-    print(f"Started with {game.num_players} player(s).")
 
     net = NetworkManager(game)
     net.start_bg()
     threading.Thread(target=_game_loop, args=(game,), daemon=True).start()
 
-    try:
-        while game.running:
-            cmd = read_command_line("> ").strip().lower()
-            if cmd in ("quit", "exit", "q"):
-                game.running = False
-                break
-            if cmd.startswith("start"):
-                parts = cmd.split()
-                try:
-                    n = int(parts[1]) if len(parts) > 1 else 1
-                    game.start_game(n)
-                    print(f"Started with {game.num_players} player(s).")
-                except (IndexError, ValueError):
-                    print("Usage: start <1-4>")
-            elif cmd == "scores":
-                with game.lock:
-                    for p in game.players:
-                        m = PianoTilesGame._combo_multiplier(p.combo)
-                        print(f"  Player {p.slot + 1}: score={p.score}  combo={p.combo}  next×{m}")
-            elif cmd == "reset":
-                game.reset()
-                print("Tiles cleared. Scores unchanged. Use 'start N' to reset players and scores.")
-            elif cmd == "pause":
-                if game.state == "ENDED":
-                    print("Game already ended.")
-                else:
-                    with game.lock:
-                        game.state = "PAUSED"
-                        game._paused_at = time.time()
-                    print("Paused.")
-            elif cmd == "resume":
-                if game.state == "ENDED":
-                    print("Game already ended.")
-                else:
-                    with game.lock:
-                        pause_len = time.time() - game._paused_at
-                        if game.chart_events:
-                            game.chart_origin_time += pause_len
-                        game.state = "PLAYING"
-                        game.last_tick = time.time()
-                    print("Resumed.")
-            elif cmd:
-                print("Unknown command.")
-    except KeyboardInterrupt:
-        game.running = False
+    root = tk.Tk()
+    root.withdraw()
 
+    try:
+        import piano_tiles_scoreboard as _sb
+        _sb.ScoreboardApp(master=root)
+    except Exception as e:
+        print(f"[scoreboard] Could not launch scoreboard window: {e}")
+
+    LobbyPanel(game, song_entries, root)
+
+    def console_loop():
+        try:
+            while game.running:
+                cmd = read_command_line("> ").strip().lower()
+                if cmd in ("quit", "exit", "q"):
+                    game.running = False
+                    root.quit()
+                    break
+                elif cmd == "scores":
+                    with game.lock:
+                        for p in game.players:
+                            m = PianoTilesGame._combo_multiplier(p.combo)
+                            print(f"  Player {p.slot + 1}: score={p.score}  combo={p.combo}  next×{m}")
+                elif cmd == "reset":
+                    game.reset()
+                    print("Tiles cleared.")
+                elif cmd:
+                    print("Unknown command.")
+        except KeyboardInterrupt:
+            game.running = False
+            root.quit()
+
+    if platform.system() != "Darwin":
+        threading.Thread(target=console_loop, daemon=True).start()
+
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
+
+    game.running = False
     net.running = False
     print("Exiting.")
 
