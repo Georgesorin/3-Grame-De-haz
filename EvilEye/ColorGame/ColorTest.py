@@ -35,6 +35,9 @@ def _play_music_blocking(path, stop_event_callable):
     """
     Block until the given mp3 finishes or stop_event_callable() is true.
     Safe to call from a worker thread. No-op if pygame or file is missing.
+
+    Uses mixer.Sound (not mixer.music): on Windows, music streams often fail
+    when played from background threads; Sound matches palette clips and FIRE's behavior.
     """
     if _pygame is None:
         return
@@ -48,31 +51,36 @@ def _play_music_blocking(path, stop_event_callable):
         print("Color Rush: mixer init (narration):", e, file=sys.stderr)
         return
     try:
-        _pygame.mixer.music.load(path)
-        _pygame.mixer.music.play()
-        while _pygame.mixer.music.get_busy():
+        snd = _pygame.mixer.Sound(path)
+        ch = _pygame.mixer.find_channel(True)
+        if ch is None:
+            ch = _pygame.mixer.Channel(0)
+        ch.play(snd)
+        while ch.get_busy():
             if stop_event_callable():
-                _pygame.mixer.music.stop()
-                break
-            _pygame.time.wait(80)
+                ch.stop()
+                return
+            _pygame.time.wait(30)
     except Exception as e:
         print("Color Rush: narration playback:", e, file=sys.stderr)
-        try:
-            _pygame.mixer.music.stop()
-        except Exception:
-            pass
 # Controller.py lives in parent EvilEye/, not ColorGame/
 _EVILEYE_ROOT = os.path.dirname(_DIR)
 if _EVILEYE_ROOT not in sys.path:
     sys.path.insert(0, _EVILEYE_ROOT)
 
-from Controller import LightService, load_config
+from Controller import LightService, load_config, logical_rgb_to_wire_grb, receiver_bind_ip_from_config
+
+# Logical RGB in set_led / palette tuples → GRB in UDP frames (shared with Fire).
+assert logical_rgb_to_wire_grb(1, 2, 3) == (2, 1, 3)
 
 
 class MirroringLightService(LightService):
     """Send each LED frame to the configured device and, when that is not loopback,
     also to 127.0.0.1 so EvilEye Simulator on the same PC receives the same packets
     (hardware IP in eye_ctrl_config.json does not need to match the sim).
+
+    set_led(..., r, g, b) is logical RGB; frames use GRB via build_frame_data /
+    logical_rgb_to_wire_grb.
     """
 
     _LOCAL_TARGETS = frozenset({"127.0.0.1", "localhost"})
@@ -110,6 +118,7 @@ TEAM_HEX        = ["#ff3c00","#0064ff","#00d23c","#c800c8"]
 TEAM_NAMES_DEF  = ["TEAM A","TEAM B","TEAM C","TEAM D"]
 
 # Fixed 5-color palette (indices 0..4); five random LEDs per wall get one color each.
+# Tuples are logical (R, G, B). Frames use GRB (Controller.logical_rgb_to_wire_grb).
 PALETTE_5 = [
     (255, 0, 0),
     (0, 255, 0),
@@ -587,6 +596,7 @@ class ColorRushApp(tk.Tk):
         recv = int(self._cfg.get("receiver_port", 7800))
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
+        self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
         self._service.start_receiver()
         self._service.start_polling()
@@ -1097,14 +1107,16 @@ class ColorRushApp(tk.Tk):
             recv = int(self._cfg.get("receiver_port", 7800))
         except (TypeError, ValueError):
             udp, recv = 4626, 7800
-        prev_recv = self._service._recv_port
-        if recv != prev_recv:
+        bind = receiver_bind_ip_from_config(self._cfg)
+        was_running = self._service._recv_running
+        if was_running:
             self._service.stop_receiver()
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
-        if recv != prev_recv:
+        self._service.set_bind_ip(bind)
+        if was_running:
             self._service.start_receiver()
-        self._set_status(f"{ip}:{udp}  ·  listen {recv}")
+        self._set_status(f"{ip}:{udp}  ·  recv {recv} @ {bind}")
 
     def _start_game(self):
         self._cfg = load_config()

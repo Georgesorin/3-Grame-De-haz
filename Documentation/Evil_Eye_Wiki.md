@@ -116,6 +116,10 @@ uint8_t calc_checksum(uint8_t* data, size_t len) {
 
 The Evil Eye topology maps an array of dictionaries representing 4 walls, 11 LEDs each. You must construct a strictly 132-byte frame layout. Each pixel requires 3 bytes spaced to accommodate hardware shift registers mathematically, iterating channel offset `channel - 1` alongside physical indexes.
 
+### Colour: logical RGB vs wire order (GRB)
+
+The LEDs are **not** driven with RGB byte order on the wire. Each pixel’s three bytes in the 132-byte frame are **Green, then Red, then Blue (GRB)** — the order written in the examples below (`frame[led*12+idx] = g`, etc.). Application code (e.g. `ColorTest.py`, `Fire/fire.py`, `Controller.py`) should still think in **normal `(r, g, b)`** for red/green/blue; only the **frame packer** reorders into GRB. Games that call `LightService.set_led(channel, led, r, g, b)` or the equivalent already get this mapping via `build_frame_data`.
+
 <details>
 <summary><b>Python Example</b></summary>
 

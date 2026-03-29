@@ -37,8 +37,20 @@ def _load_eye_ctrl_config():
     return defaults
 
 
+def _receiver_bind_ip_from_cfg(cfg):
+    """Same rules as Controller.receiver_bind_ip_from_config (no Controller import)."""
+    if "receiver_bind_ip" in cfg:
+        r = (cfg.get("receiver_bind_ip") or "").strip()
+        if r:
+            return r
+    v = (cfg.get("virtual_iface_ip") or "").strip()
+    if v:
+        return v
+    return "0.0.0.0"
+
+
 def _fire_network_from_cfg(cfg):
-    """device_ip, send_port, recv_port for FireGame."""
+    """device_ip, send_port, recv_port, recv_bind_ip for FireGame."""
     ip = (cfg.get("device_ip") or "").strip() or "255.255.255.255"
     try:
         udp = int(cfg.get("udp_port", _DEFAULT_SEND_PORT))
@@ -48,7 +60,8 @@ def _fire_network_from_cfg(cfg):
         recv = int(cfg.get("receiver_port", _DEFAULT_RECV_PORT))
     except (TypeError, ValueError):
         recv = _DEFAULT_RECV_PORT
-    return ip, udp, recv
+    bind = _receiver_bind_ip_from_cfg(cfg)
+    return ip, udp, recv, bind
 
 _PASSWORD = [
     35,63,187,69,107,178,92,76,39,69,205,37,223,255,165,231,
@@ -108,14 +121,21 @@ def _build_cmd(seq, data_id, msg_loc, payload):
     p[10]=(seq>>8)&0xFF; p[11]=seq&0xFF
     p.append(_cksum(p)); return bytes(p)
 
+def _logical_rgb_to_wire_grb(r, g, b):
+    """Same mapping as Controller.logical_rgb_to_wire_grb — logical RGB → GRB wire bytes."""
+    return (g & 0xFF, r & 0xFF, b & 0xFF)
+
+
 def _make_frame(led_states):
+    """132-byte Evil Eye frame: logical (r,g,b) per LED → GRB on the wire (Evil_Eye_Wiki §2)."""
     frame = bytearray(FRAME_DATA_LEN)
     for (ch,led),(r,g,b) in led_states.items():
         ci = ch - 1
         if 0 <= ci < NUM_CHANNELS and 0 <= led < LEDS_PER_CHANNEL:
-            frame[led*12+ci]   = g
-            frame[led*12+4+ci] = r
-            frame[led*12+8+ci] = b
+            w0, w1, w2 = _logical_rgb_to_wire_grb(r, g, b)
+            frame[led*12+ci]   = w0
+            frame[led*12+4+ci] = w1
+            frame[led*12+8+ci] = w2
     return bytes(frame)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,10 +411,12 @@ class FireGame:
     def __init__(self, device_ip="255.255.255.255",
                  send_port=_DEFAULT_SEND_PORT,
                  recv_port=_DEFAULT_RECV_PORT,
+                 recv_bind_ip="0.0.0.0",
                  on_event=None):
         self.device_ip      = device_ip
         self.send_port      = send_port
         self.recv_port      = recv_port
+        self.recv_bind_ip   = recv_bind_ip
         self.on_event       = on_event
 
         self._seq           = 0
@@ -422,11 +444,13 @@ class FireGame:
 
         self._rsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._rsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._rsock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._rsock.settimeout(0.2)
+        bind_host = (recv_bind_ip or "0.0.0.0").strip() or "0.0.0.0"
         try:
-            self._rsock.bind(("0.0.0.0", self.recv_port))
+            self._rsock.bind((bind_host, self.recv_port))
         except Exception as e:
-            self._emit("log", msg=f"Recv bind error :{self.recv_port} – {e}")
+            self._emit("log", msg=f"Recv bind error {bind_host}:{self.recv_port} – {e}")
 
         threading.Thread(target=self._recv_loop, daemon=True).start()
 
@@ -727,7 +751,7 @@ class FireGameUI:
 
     def _apply_eye_cfg_to_ui(self):
         cfg = _load_eye_ctrl_config()
-        ip, _, _ = _fire_network_from_cfg(cfg)
+        ip, _, _, _ = _fire_network_from_cfg(cfg)
         self._ip_var.set(ip)
 
     def _build_ui(self):
@@ -919,13 +943,14 @@ class FireGameUI:
         self._lbl_word.config(text="", fg="white")
         self._lbl_eye.config(text="")
         cfg = _load_eye_ctrl_config()
-        ip, send_port, recv_port = _fire_network_from_cfg(cfg)
+        ip, send_port, recv_port, recv_bind = _fire_network_from_cfg(cfg)
         self._ip_var.set(ip)
         self.game = FireGame(
-            device_ip  = ip,
-            send_port  = send_port,
-            recv_port  = recv_port,
-            on_event   = self._on_game_event,
+            device_ip    = ip,
+            send_port    = send_port,
+            recv_port    = recv_port,
+            recv_bind_ip = recv_bind,
+            on_event     = self._on_game_event,
         )
         self.game.start(
             total_rounds   = self._rounds_var.get(),

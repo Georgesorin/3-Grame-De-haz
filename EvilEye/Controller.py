@@ -126,21 +126,28 @@ def build_fff0_packet(seq: int) -> bytes:
     return pkt
 
 
+def logical_rgb_to_wire_grb(r: int, g: int, b: int) -> tuple[int, int, int]:
+    """Logical red/green/blue → three frame bytes in hardware GRB order (wiki §2)."""
+    return (g & 0xFF, r & 0xFF, b & 0xFF)
+
+
 def build_frame_data(led_states: dict) -> bytes:
     """
-    led_states: {(channel 1-4, led 0-10): (r, g, b)}
-    Frame layout per C# BuildCompleteFrameData:
-      frame[led*12 + ch]     = Green
-      frame[led*12 + 4 + ch] = Red
-      frame[led*12 + 8 + ch] = Blue
+    led_states: {(channel 1-4, led 0-10): (r, g, b)} — logical RGB in application code.
+
+    On the wire each pixel is GRB via logical_rgb_to_wire_grb(); see Evil_Eye_Wiki.md §2.
+      frame[led*12 + ch]     = G
+      frame[led*12 + 4 + ch] = R
+      frame[led*12 + 8 + ch] = B
     """
     frame = bytearray(FRAME_DATA_LEN)
     for (ch, led), (r, g, b) in led_states.items():
         ch_idx = ch - 1
         if 0 <= ch_idx < NUM_CHANNELS and 0 <= led < LEDS_PER_CHANNEL:
-            frame[led * 12 + ch_idx]       = g
-            frame[led * 12 + 4 + ch_idx]   = r
-            frame[led * 12 + 8 + ch_idx]   = b
+            w0, w1, w2 = logical_rgb_to_wire_grb(r, g, b)
+            frame[led * 12 + ch_idx]     = w0
+            frame[led * 12 + 4 + ch_idx] = w1
+            frame[led * 12 + 8 + ch_idx] = w2
     return bytes(frame)
 
 
@@ -445,6 +452,22 @@ DEFAULT_CONFIG = {
 }
 
 
+def receiver_bind_ip_from_config(cfg: dict) -> str:
+    """Local address for button UDP receiver (games + Controller).
+
+    If eye_ctrl_config.json sets receiver_bind_ip, that wins (use 0.0.0.0 for all
+    interfaces / broadcast). Otherwise virtual_iface_ip, then 0.0.0.0.
+    """
+    if "receiver_bind_ip" in cfg:
+        r = (cfg.get("receiver_bind_ip") or "").strip()
+        if r:
+            return r
+    v = (cfg.get("virtual_iface_ip") or "").strip()
+    if v:
+        return v
+    return "0.0.0.0"
+
+
 def load_config():
     try:
         with open(CONFIG_FILE) as f:
@@ -503,9 +526,7 @@ class LightControlApp(tk.Tk):
             self._service.set_device(self._cfg["device_ip"], self._cfg.get("udp_port", 4626))
         
         self._service.set_recv_port(self._cfg.get("receiver_port", 7800))
-
-        if self._cfg.get("virtual_iface_ip"):
-            self._service.set_bind_ip(self._cfg["virtual_iface_ip"])
+        self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
             
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
 
@@ -899,6 +920,7 @@ class LightControlApp(tk.Tk):
             self._service.set_device(new_cfg["device_ip"], new_cfg.get("udp_port", 4626))
             self._lbl_device.configure(text=f"Device: {new_cfg['device_ip']}", fg="#0f0")
         self._service.set_recv_port(new_cfg.get("receiver_port", 7800))
+        self._service.set_bind_ip(receiver_bind_ip_from_config(new_cfg))
         self._service.set_poll_rate(new_cfg.get("polling_rate_ms", 100))
         self._log("Configuration saved")
 
