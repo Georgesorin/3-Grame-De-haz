@@ -126,7 +126,7 @@ def _noise(x: int, y: int, tick: int) -> float:
     return ((x * 17 + y * 31 + tick * 137) % 256) / 255.0
 
 
-def _vscroll_y(block_height: int, elapsed: float, speed: float = 10.0) -> int:
+def _vscroll_y(block_height: int, elapsed: float, speed: float = 5.0) -> int:
     """Y-offset for a block that enters from the bottom and scrolls upward, looping."""
     total = BOARD_HEIGHT + block_height
     return int(BOARD_HEIGHT - (elapsed * speed) % total)
@@ -241,13 +241,8 @@ class ChaseGame:
         if player_id >= self.num_players:
             return
 
-        px, py = self._players[player_id]["pos"]
-        dx = (1 if x > px else -1 if x < px else 0)
-        dy = (1 if y > py else -1 if y < py else 0)
-        if dx != 0:
-            self._try_move_player(player_id, dx, 0)
-        elif dy != 0:
-            self._try_move_player(player_id, 0, dy)
+        if 0 <= x < BOARD_WIDTH and 0 <= y < BOARD_HEIGHT:
+            self._players[player_id]["pos"] = (x, y)
 
     def on_key_direction(self, player_id: int, dx: int, dy: int):
         if self._game_state != "playing" or not self._running:
@@ -333,7 +328,7 @@ class ChaseGame:
         gap     = 2
         w_game  = _text_rot_height("GAME")    # 15 px
         blk_h   = w_start + gap + w_game      # 36 px
-        y0      = _vscroll_y(blk_h, t, 8.0)  # slow slide — both words pass through together
+        y0      = _vscroll_y(blk_h, t, 4.0)  # slow slide — both words pass through together
         _draw_text_rot(frame, "START", y0,               (0, 245, 220))
         _draw_text_rot(frame, "GAME",  y0 + w_start + gap, (0, 185, 255))
         _draw_start_circle(frame, t)
@@ -411,7 +406,7 @@ class ChaseGame:
             w_h   = _text_rot_height("GAME")
             gap   = 8
             blk_h = w_h + gap + w_h
-            y0    = _vscroll_y(blk_h, t2, 11.0)
+            y0    = _vscroll_y(blk_h, t2, 5.5)
             _draw_text_rot(frame, "GAME", y0,             (210, 60,  200))
             _draw_text_rot(frame, "OVER", y0 + w_h + gap, (180, 80,  255))
 
@@ -455,6 +450,7 @@ class ChaseGame:
         self._running    = False
         self._game_state = "level_intro"
         self._anim_start = time.time()
+        self.on_game_event("level_up", {"level": self._level})
 
     # ── Internal: island helpers ───────────────────────────────────────────────
 
@@ -765,6 +761,7 @@ class ChaseGame:
                 self._sea_cells.add(pos)
                 self._wave_gems += 1
                 p["score"] += 10
+                self.on_game_event("treasure", {"player": player_id})
                 if self._wave_gems >= self._wave_need:
                     self._level += 1
                     self._wave_gems = 0

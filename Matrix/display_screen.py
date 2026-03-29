@@ -211,23 +211,20 @@ class DisplayScreen:
         return {"x": random.random(), "y": random.random(), "vy": random.uniform(0.0003, 0.001),
                 "size": random.uniform(1, 2.5), "color": random.choice([C_CYAN, C_BLUE, C_GOLD, "#ffffff"])}
 
-# ── FUNCTIA PLAY_SOUND (LIPSĂ ANTERIOR) ──
-def play_sound(name: str):
-    path = os.path.join("sounds", f"{name}.wav")
-    try:
-        import pygame
-        if not pygame.mixer.get_init():
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-        if os.path.exists(path):
-            pygame.mixer.Sound(path).play()
-            return
-    except: pass
-    try:
-        import winsound
-        if os.path.exists(path):
-            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            return
-    except: pass
+# ── FUNCTIA PLAY_SOUND ──
+def play_sound(path: str):
+    """Play a sound file (full path, MP3 or WAV) in a background thread."""
+    import threading
+    def _play():
+        try:
+            import pygame.mixer as mx
+            if not mx.get_init():
+                mx.init(frequency=44100, size=-16, channels=2, buffer=512)
+            if os.path.exists(path):
+                mx.Sound(path).play()
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_play, daemon=True).start()
 
 def launch_display_screen(master, monitor_offset_x=0, fullscreen=False, on_config_confirmed=None):
     screen = DisplayScreen(master, monitor_offset_x, fullscreen, on_config_confirmed)

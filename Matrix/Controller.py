@@ -425,16 +425,18 @@ class MatrixGUI:
     def _on_chase_event(self, event_name: str, data: dict):
         """Callback din ChaseGame — ruleaza pe game thread."""
         print(f"[GAME EVENT] {event_name}: {data}")
+        import os
         from display_screen import play_sound
-        sound_map = {
-            "level_up":  "level_up",
-            "game_over": "game_over",
-            "hit":       "hit",
+        _SOUNDS_DIR = os.path.join(os.path.dirname(__file__), "sounds")
+        _SOUND_MAP = {
+            "game_over": os.path.join(_SOUNDS_DIR, "SUPER MARIO - game over - sound effect.mp3"),
+            "level_up":  os.path.join(_SOUNDS_DIR, "Achievement Sound Effect.mp3"),
+            "treasure":  os.path.join(_SOUNDS_DIR, "coin.mp3"),
         }
-        if event_name == "pickup":
-            play_sound(data.get("kind", "collect"))
-        elif event_name in sound_map:
-            play_sound(sound_map[event_name])
+        if event_name == "pickup" and data.get("kind") == "freeze":
+            play_sound(os.path.join(_SOUNDS_DIR, "ice.mp3"))
+        elif event_name in _SOUND_MAP:
+            play_sound(_SOUND_MAP[event_name])
 
     # ── Chase key bindings ────────────────────────────────────────────────────
 
