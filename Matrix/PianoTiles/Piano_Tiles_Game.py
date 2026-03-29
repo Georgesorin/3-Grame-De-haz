@@ -53,6 +53,120 @@ def _play_sound_async(filename: str, delay: float = 0.0) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    if s == 0.0:
+        iv = int(v * 255)
+        return iv, iv, iv
+    i = int(h * 6)
+    f = h * 6 - i
+    p, q, t_v = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i %= 6
+    rgb = [(v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q)][i]
+    return int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+
+
+def _play_sound_async(filename: str, delay: float = 0.0) -> None:
+    """Play a sound file from the sounds directory in a background thread."""
+    path = os.path.join(_SOUNDS_DIR, filename)
+    def _run():
+        try:
+            if delay > 0:
+                time.sleep(delay)
+            if not os.path.exists(path):
+                print(f"[sound] not found: {path}")
+                return
+            snd = pygame.mixer.Sound(path)
+            snd.play()
+            time.sleep(snd.get_length() + 0.3)  # keep alive until done
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# Import 5×7 pixel font from parent Matrix directory
+_MATRIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
+try:
+    from matrix_font import FONT_5x7 as _FONT_5x7  # type: ignore
+except ImportError:
+    _FONT_5x7 = {}
+
+_SOUNDS_DIR = os.path.join(_MATRIX_DIR, "sounds")
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    if s == 0.0:
+        iv = int(v * 255)
+        return iv, iv, iv
+    i = int(h * 6)
+    f = h * 6 - i
+    p, q, t_v = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i %= 6
+    rgb = [(v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q)][i]
+    return int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+
+
+def _play_sound_async(filename: str, delay: float = 0.0) -> None:
+    """Play a sound file from the sounds directory in a background thread."""
+    path = os.path.join(_SOUNDS_DIR, filename)
+    def _run():
+        try:
+            if delay > 0:
+                time.sleep(delay)
+            if not os.path.exists(path):
+                print(f"[sound] not found: {path}")
+                return
+            snd = pygame.mixer.Sound(path)
+            snd.play()
+            time.sleep(snd.get_length() + 0.3)  # keep alive until done
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_SOUNDS_DIR = os.path.join(_MATRIX_DIR, "sounds")
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    if s == 0.0:
+        iv = int(v * 255)
+        return iv, iv, iv
+    i = int(h * 6)
+    f = h * 6 - i
+    p, q, t_v = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i %= 6
+    rgb = [(v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q)][i]
+    return int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+
+
+def _play_sound_async(filename: str, delay: float = 0.0) -> None:
+    """Play a sound file from the sounds directory in a background thread."""
+    path = os.path.join(_SOUNDS_DIR, filename)
+    def _run():
+        try:
+            if delay > 0:
+                time.sleep(delay)
+            if not os.path.exists(path):
+                print(f"[sound] not found: {path}")
+                return
+            snd = pygame.mixer.Sound(path)
+            snd.play()
+            time.sleep(snd.get_length() + 0.3)  # keep alive until done
+        except Exception as e:
+            print(f"[sound] {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# Import 5×7 pixel font from parent Matrix directory
+_MATRIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
+try:
+    from matrix_font import FONT_5x7 as _FONT_5x7  # type: ignore
+except ImportError:
+    _FONT_5x7 = {}  # fallback: no text rendered
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -130,6 +244,13 @@ TARGET_PALETTE: Tuple[Tuple[int, int, int], ...] = (
     MAGENTA,
     ORANGE,
 )
+
+# 5-col × 7-row pixel bitmaps for countdown digits (scale ×2 → 10×14, centered in 16×32)
+_COUNTDOWN_DIGITS = {
+    '3': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[1,1,1,1,0]],
+    '2': [[1,1,1,1,0],[0,0,0,1,0],[0,0,0,1,0],[0,1,1,1,0],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,1,0]],
+    '1': [[0,1,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,1,1,1,0]],
+}
 
 ROW_NAME_TO_INDEX = {
     "red": 0,
@@ -465,6 +586,10 @@ class PianoTilesGame:
             self._reload_chart()
             self.chart_next_index = 0
             self._song_end_message_printed = False
+            self.countdown_start = time.time()
+            self._victory_sounds_done = set()
+            self.state = "COUNTDOWN"
+            _play_sound_async("3 2 1 0 Countdown With Sound Effect  No Copyright  Ready To Use.mp3", delay=1.0)
             self.countdown_start = time.time()
             self._victory_sounds_done = set()
             self.state = "COUNTDOWN"

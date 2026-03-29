@@ -223,7 +223,7 @@ class GuessTheGame:
         return self.active_guess_team is None
 
     def setup_players(self, count: int) -> None:
-        if count not in (2, 4):
+        if count not in (1, 2, 4):
             count = 2
         self.num_players = count
 
@@ -398,7 +398,7 @@ class GuessTheGame:
         For 4 players the mat is split horizontally: Team 1 draws on top, Team 2 on bottom,
         with two divider rows in the middle (y=15–16, not drawable).
         """
-        if self.num_players == 2:
+        if self.num_players <= 2:
             return 1, 14, 2, 29
         if side == "top":
             return 1, 14, 2, 14
@@ -420,7 +420,7 @@ class GuessTheGame:
             self._reset_corner_prev = {"tl": False, "br": False}
             return
 
-        if self.num_players == 2:
+        if self.num_players <= 2:
             tl_now = self._zone_fired(self.pressed_xy, RESET_2P_CELLS)
             br_now = False
         else:
@@ -433,7 +433,7 @@ class GuessTheGame:
             return
 
         if tl_now and not self._reset_corner_prev["tl"]:
-            if self.num_players == 2:
+            if self.num_players <= 2:
                 self.canvas.clear()
             else:
                 tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
@@ -449,7 +449,7 @@ class GuessTheGame:
         self._reset_corner_prev["br"] = br_now
 
     def _is_reset_marker_cell(self, x: int, y: int) -> bool:
-        if self.num_players == 2:
+        if self.num_players <= 2:
             return (x, y) in RESET_2P_CELLS
         return (x, y) in RESET_4P_TOP_CELLS or (x, y) in RESET_4P_BOTTOM_CELLS
 
@@ -461,7 +461,7 @@ class GuessTheGame:
             return False
         if self._paint_forbidden_row(y):
             return False
-        if self.num_players == 2:
+        if self.num_players <= 2:
             x0, x1, y0, y1 = self._drawable_bounds("top")
             return x0 <= x <= x1 and y0 <= y <= y1
         tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
@@ -469,6 +469,8 @@ class GuessTheGame:
         return (tx0 <= x <= tx1 and ty0 <= y <= ty1) or (bx0 <= x <= bx1 and by0 <= y <= by1)
 
     def _team_index_for_stroke(self, x: int, y: int) -> int:
+        if self.num_players == 1:
+            return 0
         if self.num_players == 4:
             tx0, tx1, ty0, ty1 = self._drawable_bounds("top")
             if tx0 <= x <= tx1 and ty0 <= y <= ty1:
@@ -497,8 +499,11 @@ class GuessTheGame:
             if y == PALETTE_ROW_TOP and 0 <= x < BOARD_WIDTH:
                 self.team_draw_colors[0] = PALETTE_COLORS[self._palette_color_index(x)]
                 continue
-            if self.num_players >= 2 and y == PALETTE_ROW_BOTTOM and 0 <= x < BOARD_WIDTH:
-                self.team_draw_colors[1] = PALETTE_COLORS[self._palette_color_index(x)]
+            if y == PALETTE_ROW_BOTTOM and 0 <= x < BOARD_WIDTH:
+                if self.num_players == 1:
+                    self.team_draw_colors[0] = PALETTE_COLORS[self._palette_color_index(x)]
+                elif self.num_players >= 2:
+                    self.team_draw_colors[1] = PALETTE_COLORS[self._palette_color_index(x)]
                 continue
             if not self._cell_allows_paint(x, y):
                 continue
@@ -582,7 +587,7 @@ class GuessTheGame:
                     self.set_led(buffer, x, 15, SPLIT_LINE)
                     self.set_led(buffer, x, 16, SPLIT_LINE)
 
-            if self.num_players == 2:
+            if self.num_players <= 2:
                 for x, y in RESET_2P_CELLS:
                     self.set_led(buffer, x, y, RESET_MARKER_RED)
             else:
@@ -914,6 +919,8 @@ class DualUI:
             "font": self._font_ui,
             "highlightthickness": 0,
         }
+        self.rb_1p = tk.Radiobutton(start_row, text="1 player", variable=self.var_players, value=1, **rb_kw)
+        self.rb_1p.pack(side=tk.LEFT, padx=(0, 20))
         self.rb_2p = tk.Radiobutton(start_row, text="2 players", variable=self.var_players, value=2, **rb_kw)
         self.rb_2p.pack(side=tk.LEFT, padx=(0, 20))
         self.rb_4p = tk.Radiobutton(start_row, text="4 players", variable=self.var_players, value=4, **rb_kw)
@@ -1206,10 +1213,10 @@ class DualUI:
 
     def _ui_start_game(self) -> None:
         n = int(self.var_players.get())
-        if n not in (2, 4):
+        if n not in (1, 2, 4):
             n = 2
         self.game.start_game(n)
-        self.status.config(text=f"Game on — {n} players.")
+        self.status.config(text=f"Game on — {n} player{'s' if n > 1 else ''}.")
         self._pulse_status_border()
 
     def _send_manual_word_ui(self) -> None:
@@ -1251,7 +1258,7 @@ class DualUI:
             n = self.game.num_players
         if not playing:
             return
-        if n == 2:
+        if n <= 2:
             self.btn_reset_full.pack(fill=tk.X, pady=4)
         else:
             self.btn_reset_top.pack(fill=tk.X, pady=4)
@@ -1260,14 +1267,11 @@ class DualUI:
     def _sync_start_row(self) -> None:
         with self.game.lock:
             st = self.game.state
-        if st == "LOBBY":
-            self.btn_start.config(state=tk.NORMAL)
-            self.rb_2p.config(state=tk.NORMAL)
-            self.rb_4p.config(state=tk.NORMAL)
-        else:
-            self.btn_start.config(state=tk.DISABLED)
-            self.rb_2p.config(state=tk.DISABLED)
-            self.rb_4p.config(state=tk.DISABLED)
+        s = tk.NORMAL if st == "LOBBY" else tk.DISABLED
+        self.btn_start.config(state=s)
+        self.rb_1p.config(state=s)
+        self.rb_2p.config(state=s)
+        self.rb_4p.config(state=s)
 
     def _arm(self, team: int) -> None:
         with self.game.lock:
@@ -1519,7 +1523,10 @@ def main() -> None:
             elif cmd:
                 print("Unknown command.")
 
-    threading.Thread(target=console_loop, daemon=True).start()
+    import platform
+    if platform.system() != "Darwin":
+        # On macOS, blocking input() in a thread crashes Tcl's notifier
+        threading.Thread(target=console_loop, daemon=True).start()
 
     try:
         root.mainloop()
