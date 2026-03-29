@@ -6,6 +6,13 @@ import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
 
+from Controller import (
+    load_led_map,
+    build_input_inverse_led_map,
+    map_logical_to_physical,
+    map_physical_to_logical,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Protocol
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,6 +432,18 @@ class FireGame:
         self._running       = False
         self._prev_btn      = {}
 
+        self._led_map = load_led_map()
+        self._led_map_inv = build_input_inverse_led_map(self._led_map)
+
+        cfg = _load_eye_ctrl_config()
+        try:
+            self._poll_ms = int(cfg.get("polling_rate_ms", 100))
+        except (TypeError, ValueError):
+            self._poll_ms = 100
+
+        self._poll_stop = threading.Event()
+        self._poll_thr = None
+
         self.scores         = {p: 0 for p in range(1, 5)}
         self.round_num      = 0
         self.total_rounds   = 10
@@ -456,11 +475,12 @@ class FireGame:
 
     # ── LED helpers ───────────────────────────────────────────────────────────
     def _set(self, ch, led, r, g, b):
+        phys_ch, phys_led = map_logical_to_physical(self._led_map, ch, led)
         with self._led_lock:
             if r == g == b == 0:
-                self._led.pop((ch, led), None)
+                self._led.pop((phys_ch, phys_led), None)
             else:
-                self._led[(ch, led)] = (r, g, b)
+                self._led[(phys_ch, phys_led)] = (r, g, b)
 
     def _flush(self):
         with self._led_lock:
@@ -471,14 +491,19 @@ class FireGame:
         ep  = (self.device_ip, self.send_port)
         try:
             self._ssock.sendto(_build_start(seq), ep)
-            time.sleep(0.005)
+            time.sleep(0.008)
             self._ssock.sendto(_build_fff0(seq), ep)
-            time.sleep(0.005)
+            time.sleep(0.008)
             self._ssock.sendto(_build_cmd(seq, 0x8877, 0x0000, frame), ep)
-            time.sleep(0.005)
+            time.sleep(0.008)
             self._ssock.sendto(_build_end(seq), ep)
         except Exception:
             pass
+
+    def _poll_loop(self):
+        while not self._poll_stop.is_set():
+            self._flush()
+            self._poll_stop.wait(max(0.01, self._poll_ms / 1000.0))
 
     def _all_off(self):
         with self._led_lock:
@@ -503,13 +528,16 @@ class FireGame:
                 continue
             if sum(data[:-1]) & 0xFF != data[-1]:
                 continue
-            for ch in range(1, 5):
-                base = 2 + (ch-1)*171
-                for idx in range(LEDS_PER_CHANNEL):
-                    trig = (data[base+1+idx] == 0xCC)
-                    if trig and not self._prev_btn.get((ch,idx), False):
-                        self._on_btn_down(ch, idx)
-                    self._prev_btn[(ch,idx)] = trig
+            for physical_ch in range(1, 5):
+                base = 2 + (physical_ch - 1) * 171
+                for physical_led in range(LEDS_PER_CHANNEL):
+                    logical_ch, logical_led = map_physical_to_logical(
+                        self._led_map_inv, physical_ch, physical_led
+                    )
+                    trig = (data[base + 1 + physical_led] == 0xCC)
+                    if trig and not self._prev_btn.get((logical_ch, logical_led), False):
+                        self._on_btn_down(logical_ch, logical_led)
+                    self._prev_btn[(logical_ch, logical_led)] = trig
 
     def _on_btn_down(self, ch, idx):
         if ch not in self.active_players or not self._react_open:
@@ -548,11 +576,18 @@ class FireGame:
         self.scores         = {p: 0 for p in range(1,5)}
         self.round_num      = 0
         self._running       = True
+
+        self._poll_stop.clear()
+        if self._poll_thr is None or not self._poll_thr.is_alive():
+            self._poll_thr = threading.Thread(target=self._poll_loop, daemon=True)
+            self._poll_thr.start()
+
         threading.Thread(target=self._game_loop, daemon=True).start()
 
     def stop(self):
         self._running = False
         self._react_ev.set()
+        self._poll_stop.set()
 
     # ── Sound folder picker ───────────────────────────────────────────────────
     def _pick_sound_folder(self):

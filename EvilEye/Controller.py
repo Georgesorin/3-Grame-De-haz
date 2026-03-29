@@ -24,6 +24,99 @@ import struct
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 CONFIG_FILE        = os.path.join(os.path.dirname(__file__), "eye_ctrl_config.json")
+LED_MAP_FILE       = os.path.join(os.path.dirname(__file__), "eye_led_map.json")
+UDP_DEVICE_PORT    = 4626   # send light commands to device
+UDP_RECEIVER_PORT  = 7800   # listen for button events from device
+NUM_CHANNELS       = 4
+LEDS_PER_CHANNEL   = 11     # 0 = Eye, 1-10 = Buttons
+FRAME_DATA_LEN     = LEDS_PER_CHANNEL * NUM_CHANNELS * 3   # 132 bytes
+
+
+def _default_led_map() -> dict:
+    ident = list(range(LEDS_PER_CHANNEL))
+    return {
+        "logical_wall_to_physical_wall": {
+            str(ch): ch for ch in range(1, NUM_CHANNELS + 1)
+        },
+        "logical_led_to_physical_led": {
+            str(ch): ident[:] for ch in range(1, NUM_CHANNELS + 1)
+        },
+    }
+
+
+def _sanitize_led_map(data: dict | None) -> dict:
+    out = _default_led_map()
+    if not isinstance(data, dict):
+        return out
+
+    wall_map = data.get("logical_wall_to_physical_wall", {})
+    led_map = data.get("logical_led_to_physical_led", {})
+
+    for ch in range(1, NUM_CHANNELS + 1):
+        key = str(ch)
+
+        try:
+            phys_wall = int(wall_map.get(key, ch))
+        except (TypeError, ValueError):
+            phys_wall = ch
+        if 1 <= phys_wall <= NUM_CHANNELS:
+            out["logical_wall_to_physical_wall"][key] = phys_wall
+
+        raw = led_map.get(key, list(range(LEDS_PER_CHANNEL)))
+        if isinstance(raw, list) and len(raw) == LEDS_PER_CHANNEL:
+            cleaned = []
+            ok = True
+            for v in raw:
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    ok = False
+                    break
+                if not (0 <= iv < LEDS_PER_CHANNEL):
+                    ok = False
+                    break
+                cleaned.append(iv)
+            if ok and sorted(cleaned) == list(range(LEDS_PER_CHANNEL)):
+                out["logical_led_to_physical_led"][key] = cleaned
+
+    return out
+
+
+def load_led_map() -> dict:
+    try:
+        with open(LED_MAP_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return _default_led_map()
+    return _sanitize_led_map(data)
+
+
+def build_input_inverse_led_map(led_map: dict) -> dict:
+    inv = {}
+    wall_map = led_map["logical_wall_to_physical_wall"]
+    led_remap = led_map["logical_led_to_physical_led"]
+
+    for logical_ch in range(1, NUM_CHANNELS + 1):
+        key = str(logical_ch)
+        physical_ch = int(wall_map.get(key, logical_ch))
+        remap = led_remap.get(key, list(range(LEDS_PER_CHANNEL)))
+        for logical_led in range(LEDS_PER_CHANNEL):
+            physical_led = int(remap[logical_led])
+            inv[(physical_ch, physical_led)] = (logical_ch, logical_led)
+    return inv
+
+
+def map_logical_to_physical(led_map: dict, ch: int, led: int) -> tuple[int, int]:
+    key = str(ch)
+    phys_wall = int(led_map["logical_wall_to_physical_wall"].get(key, ch))
+    remap = led_map["logical_led_to_physical_led"].get(key, list(range(LEDS_PER_CHANNEL)))
+    phys_led = int(remap[led])
+    return phys_wall, phys_led
+
+
+def map_physical_to_logical(inv_map: dict, ch: int, led: int) -> tuple[int, int]:
+    return inv_map.get((ch, led), (ch, led))
+
 UDP_DEVICE_PORT    = 4626   # send light commands to device
 UDP_RECEIVER_PORT  = 7800   # listen for button events from device
 NUM_CHANNELS       = 4
@@ -155,23 +248,19 @@ def build_frame_data(led_states: dict) -> bytes:
 # Network Service
 # ─────────────────────────────────────────────────────────────────────────────
 class LightService:
-    """
-    Three dedicated threads:
-      1. _sender_thread  – drains the send queue; one sequence at a time.
-      2. _poll_thread    – pushes LED frames into the queue at the polling rate.
-      3. _recv_thread    – listens for button-trigger UDP packets.
-    The main thread (UI) only touches callbacks via root.after().
-    """
     def __init__(self):
         self._device_ip   = None
         self._device_port = 4626
         self._recv_port   = 7800
         self._seq         = 0
-        self._led_states  = {}        # (channel, led) -> (r, g, b)
+        self._led_states  = {}        # physical (channel, led) -> (r, g, b)
         self._lock        = threading.Lock()
 
+        self._led_map = load_led_map()
+        self._led_map_inv = build_input_inverse_led_map(self._led_map)
+
         # ── Sender ────────────────────────────────────────────────────────────
-        self._send_q      = queue.Queue(maxsize=4)   # cap to avoid stale frames
+        self._send_q      = queue.Queue(maxsize=4)
         self._sender_stop = threading.Event()
         self._sender_thr  = threading.Thread(target=self._sender_loop, daemon=True)
         self._sender_thr.start()
@@ -188,157 +277,44 @@ class LightService:
         self._recv_running = False
         self._bind_ip     = "0.0.0.0"
 
-        # Track previous button states to avoid redundant UI updates
-        self._prev_btn    = {}   # (ch, led) -> (is_triggered, is_disconnected)
+        # Track previous button states in LOGICAL coordinates
+        self._prev_btn    = {}   # (logical_ch, logical_led) -> (is_triggered, is_disconnected)
 
         self.on_button_event  = None
         self.on_status        = None
         self.on_button_state  = None
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
-    def _log(self, msg):
-        if self.on_status:
-            self.on_status(msg)
+    def reload_led_map(self):
+        self._led_map = load_led_map()
+        self._led_map_inv = build_input_inverse_led_map(self._led_map)
+        self._log("LED map reloaded")
 
-    def _next_seq(self):
-        with self._lock:
-            self._seq = (self._seq + 1) & 0xFFFF
-            return self._seq
+    def _map_out(self, ch: int, led: int) -> tuple[int, int]:
+        return map_logical_to_physical(self._led_map, ch, led)
 
-    # ── Sender thread ─────────────────────────────────────────────────────────
-    def _sender_loop(self):
-        """Dedicated sender – takes (ip, frame_data) from queue and sends."""
-        while not self._sender_stop.is_set():
-            try:
-                item = self._send_q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            ip, frame_data = item
-            self._do_send_sequence(ip, frame_data)
-            self._send_q.task_done()
-
-    def _do_send_sequence(self, ip, frame_data):
-        seq = self._next_seq()
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            ep   = (ip, self._device_port)
-            sock.sendto(build_start_packet(seq), ep)
-            time.sleep(0.008)
-            sock.sendto(build_fff0_packet(seq), ep)
-            time.sleep(0.008)
-            sock.sendto(build_command_packet(0x8877, 0x0000, frame_data, seq), ep)
-            time.sleep(0.008)
-            sock.sendto(build_end_packet(seq), ep)
-            sock.close()
-        except Exception as e:
-            self._log(f"Send error: {e}")
-
-    def _enqueue_frame(self):
-        """Snapshot LED states and push to the send queue (drop if full)."""
-        if not self._device_ip:
-            return
-        with self._lock:
-            states = dict(self._led_states)
-        frame = build_frame_data(states)
-        try:
-            self._send_q.put_nowait((self._device_ip, frame))
-        except queue.Full:
-            pass   # drop oldest would be nicer, but this avoids lag buildup
-
-    # ── Poll thread ───────────────────────────────────────────────────────────
-    def _poll_loop(self):
-        while not self._poll_stop.is_set():
-            self._enqueue_frame()
-            self._poll_stop.wait(self._poll_rate / 1000.0)
-
-    # ── Public LED API (UI thread safe) ───────────────────────────────────────
-    def set_device(self, ip: str, port: int = 4626):
-        self._device_ip = ip
-        self._device_port = port
-        self._log(f"Device target set to {ip}:{port}")
-
-    def set_bind_ip(self, ip: str):
-        self._bind_ip = ip
-        self._log(f"Local bind IP set to {ip}")
-        # If receiver is running, it needs a restart to pick up the new bind IP
-        if self._recv_running:
-            self.stop_receiver()
-            self.start_receiver()
+    def _map_in(self, ch: int, led: int) -> tuple[int, int]:
+        return map_physical_to_logical(self._led_map_inv, ch, led)
 
     def set_led(self, channel, led, r, g, b):
+        phys_ch, phys_led = self._map_out(channel, led)
         with self._lock:
-            self._led_states[(channel, led)] = (r, g, b)
-        self._enqueue_frame()  # immediate send on manual click
-
-    def set_all(self, r, g, b):
-        with self._lock:
-            for ch in range(1, NUM_CHANNELS + 1):
-                for led in range(LEDS_PER_CHANNEL):
-                    self._led_states[(ch, led)] = (r, g, b)
+            if r == g == b == 0:
+                self._led_states.pop((phys_ch, phys_led), None)
+            else:
+                self._led_states[(phys_ch, phys_led)] = (r, g, b)
         self._enqueue_frame()
 
-    def all_off(self):
-        self.set_all(0, 0, 0)
-
-    # ── Polling control ───────────────────────────────────────────────────────
-    def start_polling(self):
-        if self._polling:
-            return
-        if not self._device_ip:
-            self._log("No device – cannot start polling")
-            return
-        self._polling = True
-        self._poll_stop.clear()
-        self._poll_thr = threading.Thread(target=self._poll_loop, daemon=True)
-        self._poll_thr.start()
-        self._log(f"Polling started at {self._poll_rate} ms")
-
-    def stop_polling(self):
-        if not self._polling:
-            return
-        self._polling = False
-        self._poll_stop.set()
-        # Do NOT join here – that would block the UI thread.
-        # The poll thread is a daemon and will exit cleanly on its own.
-        self._poll_thr = None
-        self._log("Polling stopped")
-
-    def set_poll_rate(self, ms: int):
-        self._poll_rate = max(10, min(5000, ms))
-
-    def set_recv_port(self, port: int):
-        self._recv_port = port
-        self._log(f"Receiver port set to {port}")
-
-    # ── Receiver control ──────────────────────────────────────────────────────
-    def start_receiver(self):
-        if self._recv_running:
-            return
-        self._recv_running = True
-        self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self._recv_sock.settimeout(0.5)
-        try:
-            bind_host = (self._bind_ip or "0.0.0.0").strip() or "0.0.0.0"
-            self._recv_sock.bind((bind_host, self._recv_port))
-            self._log(f"Receiver listening on {bind_host}:{self._recv_port}")
-        except Exception as e:
-            self._log(f"Receiver bind error: {e}")
-            self._recv_running = False
-            return
-        self._recv_thr = threading.Thread(target=self._recv_loop, daemon=True)
-        self._recv_thr.start()
-
-    def stop_receiver(self):
-        self._recv_running = False
-        if self._recv_sock:
-            try: self._recv_sock.close()
-            except: pass
-        self._log("Receiver stopped")
+    def set_all(self, r, g, b):
+        mapped = {}
+        for ch in range(1, NUM_CHANNELS + 1):
+            for led in range(LEDS_PER_CHANNEL):
+                phys_ch, phys_led = self._map_out(ch, led)
+                if r == g == b == 0:
+                    continue
+                mapped[(phys_ch, phys_led)] = (r, g, b)
+        with self._lock:
+            self._led_states = mapped
+        self._enqueue_frame()
 
     def _recv_loop(self):
         EXPECTED = 687
@@ -355,26 +331,40 @@ class LightService:
             if sum(data[:-1]) & 0xFF != data[-1]:
                 continue
 
-            for ch in range(1, NUM_CHANNELS + 1):
-                base = 2 + (ch - 1) * 171
-                triggered    = []
-                disconnected = []
-                for idx in range(LEDS_PER_CHANNEL):
-                    val    = data[base + 1 + idx]
+            grouped = {}  # logical_ch -> {"triggered": [...], "disconnected": [...]}
+
+            for physical_ch in range(1, NUM_CHANNELS + 1):
+                base = 2 + (physical_ch - 1) * 171
+                for physical_led in range(LEDS_PER_CHANNEL):
+                    val = data[base + 1 + physical_led]
                     is_trig = val == 0xCC
                     is_disc = val == 0x10
-                    prev   = self._prev_btn.get((ch, idx))
-                    new    = (is_trig, is_disc)
-                    if prev != new:                      # only fire on change
-                        self._prev_btn[(ch, idx)] = new
+
+                    logical_ch, logical_led = self._map_in(physical_ch, physical_led)
+                    prev = self._prev_btn.get((logical_ch, logical_led))
+                    new = (is_trig, is_disc)
+
+                    if prev != new:
+                        self._prev_btn[(logical_ch, logical_led)] = new
                         if self.on_button_state:
-                            self.on_button_state(ch, idx, is_trig, is_disc)
+                            self.on_button_state(logical_ch, logical_led, is_trig, is_disc)
+
+                    bucket = grouped.setdefault(
+                        logical_ch, {"triggered": [], "disconnected": []}
+                    )
                     if is_trig:
-                        triggered.append(idx)
+                        bucket["triggered"].append(logical_led)
                     elif is_disc:
-                        disconnected.append(idx)
-                if (triggered or disconnected) and self.on_button_event:
-                    self.on_button_event(ch, triggered, disconnected, addr[0])
+                        bucket["disconnected"].append(logical_led)
+
+            for logical_ch, bucket in grouped.items():
+                if (bucket["triggered"] or bucket["disconnected"]) and self.on_button_event:
+                    self.on_button_event(
+                        logical_ch,
+                        bucket["triggered"],
+                        bucket["disconnected"],
+                        addr[0],
+                    )
 
     # ── Discovery ─────────────────────────────────────────────────────────────
     def discover(self, iface_ip: str, callback):
@@ -922,6 +912,7 @@ class LightControlApp(tk.Tk):
         self._service.set_recv_port(new_cfg.get("receiver_port", 7800))
         self._service.set_bind_ip(receiver_bind_ip_from_config(new_cfg))
         self._service.set_poll_rate(new_cfg.get("polling_rate_ms", 100))
+        self._service.reload_led_map()
         self._log("Configuration saved")
 
     def _log(self, msg):
