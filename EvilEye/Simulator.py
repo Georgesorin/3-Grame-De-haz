@@ -322,11 +322,12 @@ class EvilEyeSimulator:
 
     def _update_leds(self, frame_data):
         now = time.time()
-        for led_idx in range(min(len(frame_data) // 12, LEDS_PER_CHANNEL)):
-            for ch_idx in range(NUM_CHANNELS):
-                offset = led_idx * 12 + ch_idx
-                if offset + 8 < len(frame_data):
-                    g, r, b = frame_data[offset], frame_data[offset + 4], frame_data[offset + 8]
+        ch_stride = LEDS_PER_CHANNEL * 3
+        for ch_idx in range(NUM_CHANNELS):
+            for led_idx in range(LEDS_PER_CHANNEL):
+                base = ch_idx * ch_stride + led_idx * 3
+                if base + 2 < len(frame_data):
+                    g, r, b = frame_data[base], frame_data[base + 1], frame_data[base + 2]
                     if r or g or b: self.led_timestamps[(ch_idx+1, led_idx)] = now
                     self.root.after(0, lambda c=ch_idx+1, i=led_idx, clr=(r,g,b): self._set_led(c, i, clr))
 

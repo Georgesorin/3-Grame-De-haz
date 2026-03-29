@@ -135,19 +135,22 @@ def build_frame_data(led_states: dict) -> bytes:
     """
     led_states: {(channel 1-4, led 0-10): (r, g, b)} — logical RGB in application code.
 
-    On the wire each pixel is GRB via logical_rgb_to_wire_grb(); see Evil_Eye_Wiki.md §2.
-      frame[led*12 + ch]     = G
-      frame[led*12 + 4 + ch] = R
-      frame[led*12 + 8 + ch] = B
+    Wire format: per-channel sequential GRB.
+    Each channel occupies LEDS_PER_CHANNEL*3 = 33 consecutive bytes:
+      Ch1: bytes  0-32   [G_led0, R_led0, B_led0, G_led1, ...]
+      Ch2: bytes 33-65
+      Ch3: bytes 66-98
+      Ch4: bytes 99-131
     """
     frame = bytearray(FRAME_DATA_LEN)
     for (ch, led), (r, g, b) in led_states.items():
         ch_idx = ch - 1
         if 0 <= ch_idx < NUM_CHANNELS and 0 <= led < LEDS_PER_CHANNEL:
             w0, w1, w2 = logical_rgb_to_wire_grb(r, g, b)
-            frame[led * 12 + ch_idx]     = w0
-            frame[led * 12 + 4 + ch_idx] = w1
-            frame[led * 12 + 8 + ch_idx] = w2
+            base = ch_idx * LEDS_PER_CHANNEL * 3 + led * 3
+            frame[base]     = w0
+            frame[base + 1] = w1
+            frame[base + 2] = w2
     return bytes(frame)
 
 
