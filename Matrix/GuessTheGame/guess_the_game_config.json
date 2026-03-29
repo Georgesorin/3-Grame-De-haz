@@ -1,0 +1,15 @@
+{
+  "device_ip": "255.255.255.255",
+  "send_port": 4627,
+  "recv_port": 7802,
+  "bind_ip": "0.0.0.0",
+  "scoreboard_host": "127.0.0.1",
+  "scoreboard_udp_port": 7812,
+  "words_file": "words.json",
+  "round_start_value": 100,
+  "award_decay_per_wrong": 20,
+  "min_award_on_correct": 15,
+  "wrong_guess_penalty": 10,
+  "win_score": 500,
+  "background_music": "song/background.mp3"
+}

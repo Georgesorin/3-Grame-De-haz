@@ -73,9 +73,11 @@ class MatrixSimulator:
         self.listen_port = CONFIG.get("recv_port", 4626)
         self.send_port = CONFIG.get("send_port", 7800)
 
-        # Button states for input
+        # Button states for input (hardware can hold many cells; mouse paint accumulates a stroke)
         self.pressed_leds = set()
         self.current_pressed_pos = None
+        self.mouse_btn_down = False
+        self._input_repeat_id = None
 
         # UI Setup
         self.create_widgets()
@@ -159,8 +161,9 @@ class MatrixSimulator:
         self.root.bind("<F11>", self.toggle_fullscreen)
         self.root.bind("<Escape>", self.exit_fullscreen)
         self.canvas.bind("<ButtonPress-1>", self.on_press)
-        self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<B1-Motion>", self.on_motion)
+        # Release anywhere (e.g. over the log) still ends a paint stroke started on the grid.
+        self.root.bind_all("<ButtonRelease-1>", self.on_release)
         self.root.bind("<Configure>", self.on_resize)
 
     def _update_iface_list(self):
@@ -359,84 +362,120 @@ class MatrixSimulator:
         led = (row_in_channel * 16 + x) if row_in_channel % 2 == 0 else (row_in_channel * 16 + (15 - x))
         return ch, led
 
+    def _ch_led_to_xy(self, ch, led):
+        """Inverse of _xy_to_ch_led (same zig-zag as matrix games)."""
+        row_in_channel = led // 16
+        col_raw = led % 16
+        x = col_raw if row_in_channel % 2 == 0 else 15 - col_raw
+        y = ch * 4 + row_in_channel
+        return x, y
+
     def on_press(self, event):
         x, y = self._get_button_pos(event)
-        if x is not None:
-            self.current_pressed_pos = (x, y)
-            ch, led = self._xy_to_ch_led(x, y)
-            self.pressed_leds.add((ch, led))
-            self.update_pixel(x, y, *self.grid_data[(x, y)]) # Force visual update
-            self.log(f"Input Trigger Pressed: Row {y}, Col {x}")
-            self.send_input_packet()
+        if x is None:
+            return
+        self.mouse_btn_down = True
+        # New click / stroke: clear prior touches so this matches a fresh finger-down; drag adds cells.
+        self.pressed_leds.clear()
+        self.current_pressed_pos = (x, y)
+        ch, led = self._xy_to_ch_led(x, y)
+        self.pressed_leds.add((ch, led))
+        self.update_pixel(x, y, *self.grid_data[(x, y)])
+        self.log(f"Input Trigger Pressed: Row {y}, Col {x} (drag to paint; release to clear)")
+        self.send_input_packet()
+        self._cancel_input_repeat()
+        self._input_repeat_id = self.root.after(50, self._input_repeat_tick)
 
     def on_motion(self, event):
+        if not self.mouse_btn_down:
+            return
         x, y = self._get_button_pos(event)
-        if (x, y) != getattr(self, 'current_pressed_pos', None):
-            # Release previous
-            if getattr(self, 'current_pressed_pos', None) is not None:
-                old_x, old_y = self.current_pressed_pos
-                old_ch, old_led = self._xy_to_ch_led(old_x, old_y)
-                self.pressed_leds.discard((old_ch, old_led))
-            
-            # Press new
-            self.current_pressed_pos = (x, y) if x is not None else None
-            if x is not None:
-                ch, led = self._xy_to_ch_led(x, y)
-                self.pressed_leds.add((ch, led))
-                self.update_pixel(x, y, *self.grid_data[(x, y)]) # Force visual update
-                self.log(f"Input Trigger Swiped To: Row {y}, Col {x}")
-            
+        if x is None:
+            return
+        if (x, y) == getattr(self, "current_pressed_pos", None):
+            return
+        self.current_pressed_pos = (x, y)
+        ch, led = self._xy_to_ch_led(x, y)
+        if (ch, led) not in self.pressed_leds:
+            self.pressed_leds.add((ch, led))
+            self.update_pixel(x, y, *self.grid_data[(x, y)])
             self.send_input_packet()
 
     def on_release(self, event):
-        if getattr(self, 'current_pressed_pos', None) is not None:
-            x, y = self.current_pressed_pos
-            ch, led = self._xy_to_ch_led(x, y)
-            self.pressed_leds.discard((ch, led))
-            self.update_pixel(x, y, *self.grid_data[(x, y)]) # Force visual update
-            self.log(f"Input Trigger Released: Row {y}, Col {x}")
-            self.current_pressed_pos = None
+        if not self.mouse_btn_down:
+            return
+        self._cancel_input_repeat()
+        self.mouse_btn_down = False
+        self.current_pressed_pos = None
+        if not self.pressed_leds:
             self.send_input_packet()
+            return
+        stroked = list(self.pressed_leds)
+        self.pressed_leds.clear()
+        for ch, led in stroked:
+            bx, by = self._ch_led_to_xy(ch, led)
+            if 0 <= bx < BOARD_WIDTH and 0 <= by < BOARD_HEIGHT:
+                self.update_pixel(bx, by, *self.grid_data[(bx, by)])
+        self.log("Input Trigger Released (stroke cleared)")
+        self.send_input_packet()
+
+    def _input_dest_ports(self):
+        """Games listen on different UDP ports (e.g. Piano 7801, GuessTheGame 7802). Fan-out so one simulator works with either."""
+        ports = {int(self.send_port), 7801, 7802}
+        extra = CONFIG.get("mirror_input_ports")
+        if isinstance(extra, list):
+            for p in extra:
+                try:
+                    ports.add(int(p))
+                except (TypeError, ValueError):
+                    pass
+        return sorted(ports)
+
+    def _cancel_input_repeat(self):
+        rid = getattr(self, "_input_repeat_id", None)
+        if rid is not None:
+            try:
+                self.root.after_cancel(rid)
+            except tk.TclError:
+                pass
+            self._input_repeat_id = None
+
+    def _input_repeat_tick(self):
+        if not self.mouse_btn_down:
+            self._input_repeat_id = None
+            return
+        self.send_input_packet()
+        self._input_repeat_id = self.root.after(50, self._input_repeat_tick)
 
     def send_input_packet(self):
         pkt = bytearray(1373)
         pkt[0] = 0x88
         pkt[1] = 0x01
-        
-        has_triggers = False
+
         for ch in range(8):
             base = 2 + ch * 171
             pkt[base] = 0x00
             for idx in range(64):
                 if (ch, idx) in self.pressed_leds:
                     pkt[base + 1 + idx] = 0xCC
-                    has_triggers = True
                 else:
                     pkt[base + 1 + idx] = 0x00
-                    
-        if has_triggers:
-            print(f"Simulator SENDING 1373-byte packet with ACTIVE triggers: {self.pressed_leds}")
-            
+
         pkt[-1] = sum(pkt[:-1]) & 0xFF
-        
-        # To hit all targets without broadcasts, we spray to localhost + broadcast
-        # Using the configurable self.send_port
-        targets = [("127.0.0.1", self.send_port), ("255.255.255.255", self.send_port)]
-        
-        for addr in targets:
+
+        for port in self._input_dest_ports():
+            for ip in ("127.0.0.1", "255.255.255.255"):
+                try:
+                    self.sock_send.sendto(pkt, (ip, port))
+                except OSError:
+                    pass
             try:
-                self.sock_send.sendto(pkt, addr)
-            except:
+                if getattr(self, "bind_ip", None) and self.bind_ip not in ("0.0.0.0", "127.0.0.1"):
+                    parts = self.bind_ip.split(".")
+                    bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+                    self.sock_send.sendto(pkt, (bcast, port))
+            except OSError:
                 pass
-        
-        try:
-            if getattr(self, "bind_ip", None) and self.bind_ip not in ["0.0.0.0", "127.0.0.1"]:
-                parts = self.bind_ip.split('.')
-                bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-                self.sock_send.sendto(pkt, (bcast, self.send_port))
-            else:
-                self.sock_send.sendto(pkt, ("255.255.255.255", self.send_port))
-        except: pass
 
     def network_loop(self):
         while self.running:
