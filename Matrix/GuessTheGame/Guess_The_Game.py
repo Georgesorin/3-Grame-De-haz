@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import json
+import math
 import os
 import random
 import re
@@ -31,6 +33,8 @@ def _load_config() -> dict:
         "award_decay_per_wrong": 20,
         "min_award_on_correct": 15,
         "wrong_guess_penalty": 8,
+        "win_score": 500,
+        "background_music": "song/background.mp3",
     }
     try:
         if os.path.exists(_CFG_FILE):
@@ -53,6 +57,7 @@ ROUND_START = int(CONFIG.get("round_start_value", 100))
 AWARD_DECAY = int(CONFIG.get("award_decay_per_wrong", 20))
 MIN_AWARD = int(CONFIG.get("min_award_on_correct", 15))
 WRONG_PENALTY = int(CONFIG.get("wrong_guess_penalty", 10))
+WIN_SCORE = int(CONFIG.get("win_score", 500))
 
 # ---------------------------------------------------------------------------
 # Matrix geometry (same wire protocol as Piano_Tiles / Tetris)
@@ -134,6 +139,63 @@ def _center_window_on_screen(win: tk.Misc, width: int, height: int) -> None:
     win.geometry(f"{width}x{height}+{x}+{y}")
 
 
+def _blend_rgb(a: Tuple[int, int, int], b: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+    t = max(0.0, min(1.0, t))
+    return (
+        int(a[0] + (b[0] - a[0]) * t),
+        int(a[1] + (b[1] - a[1]) * t),
+        int(a[2] + (b[2] - a[2]) * t),
+    )
+
+
+def _rgb_hex(rgb: Tuple[int, int, int]) -> str:
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def _resolve_music_path(raw: Optional[str]) -> Optional[str]:
+    if not raw or not str(raw).strip():
+        return None
+    p = str(raw).strip()
+    if os.path.isabs(p):
+        return p if os.path.isfile(p) else None
+    cand = os.path.join(_SCRIPT_DIR, p)
+    return cand if os.path.isfile(cand) else None
+
+
+def _pygame_mixer():
+    """Load pygame.mixer via importlib so we do not rely on `pygame.mixer` on the root package.
+
+    Some installs expose a minimal top-level `pygame` without a `mixer` attribute; the submodule
+    `pygame.mixer` is still the real module and provides `.music`.
+    """
+    return importlib.import_module("pygame.mixer")
+
+
+def start_background_music() -> None:
+    path = _resolve_music_path(CONFIG.get("background_music"))
+    if not path:
+        return
+    try:
+        mixer = _pygame_mixer()
+        if mixer.get_init() is None:
+            mixer.pre_init(44100, -16, 2, 1024)
+            mixer.init()
+        mixer.music.load(path)
+        mixer.music.play(-1)
+    except Exception as e:
+        print(f"Background music could not start: {e}")
+        print("Tip: reinstall audio-capable pygame, e.g.  pip install pygame-ce  or  pip install --force-reinstall pygame")
+
+
+def stop_background_music() -> None:
+    try:
+        mixer = _pygame_mixer()
+        if mixer.get_init() is not None:
+            mixer.music.stop()
+    except Exception:
+        pass
+
+
 class GuessTheGame:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -155,6 +217,7 @@ class GuessTheGame:
         self._prev_pressed_xy: Set[Tuple[int, int]] = set()
         self._last_scoreboard_broadcast = 0.0
         self._reset_corner_prev: Dict[str, bool] = {"tl": False, "br": False}
+        self.winner_team: Optional[int] = None
 
     def drawing_allowed(self) -> bool:
         return self.active_guess_team is None
@@ -180,10 +243,40 @@ class GuessTheGame:
     def start_game(self, count: int) -> None:
         with self.lock:
             self.setup_players(count)
+            self.team_scores = [0, 0]
+            self.potential_award = [ROUND_START, ROUND_START]
+            self.winner_team = None
             self._shuffle_words()
             self._next_word()
             self.active_guess_team = None
             self.state = "PLAYING"
+        start_background_music()
+
+    def play_again(self) -> None:
+        """New match after game over; same player count, scores reset."""
+        with self.lock:
+            if self.state != "GAME_OVER":
+                return
+            self.team_scores = [0, 0]
+            self.potential_award = [ROUND_START, ROUND_START]
+            self.winner_team = None
+            self.active_guess_team = None
+            self._shuffle_words()
+            self._next_word()
+            self.state = "PLAYING"
+        start_background_music()
+
+    def return_to_lobby(self) -> None:
+        with self.lock:
+            self.state = "LOBBY"
+            self.team_scores = [0, 0]
+            self.potential_award = [ROUND_START, ROUND_START]
+            self.current_word = ""
+            self.winner_team = None
+            self.active_guess_team = None
+            self.canvas.clear()
+            self._prev_pressed_xy = set(self.pressed_xy)
+        stop_background_music()
 
     def new_word_manual(self) -> None:
         with self.lock:
@@ -250,6 +343,13 @@ class GuessTheGame:
             if text == target:
                 gain = max(MIN_AWARD, self.potential_award[idx])
                 self.team_scores[idx] += gain
+                if self.team_scores[idx] >= WIN_SCORE:
+                    self.winner_team = team
+                    self.state = "GAME_OVER"
+                    stop_background_music()
+                    return (
+                        f"Team {team} wins! {self.team_scores[idx]} pts (goal {WIN_SCORE}). Game over!"
+                    )
                 msg = f"Team {team} correct! +{gain} pts. New word."
                 self._next_word()
                 return msg
@@ -270,6 +370,8 @@ class GuessTheGame:
                 "potential_award": list(self.potential_award),
                 "drawing_locked": not self.drawing_allowed(),
                 "armed_team": self.active_guess_team,
+                "winner_team": self.winner_team,
+                "win_score": WIN_SCORE,
                 "updated": t,
             }
 
@@ -435,6 +537,29 @@ class GuessTheGame:
             if self.state == "LOBBY":
                 for x in range(BOARD_WIDTH):
                     self.set_led(buffer, x, 14, GRAY_BRIGHT)
+                return buffer
+
+            if self.state == "GAME_OVER":
+                gold = (255, 210, 72)
+                dim = (35, 40, 55)
+                for y in range(32):
+                    for x in range(BOARD_WIDTH):
+                        self.set_led(buffer, x, y, dim)
+                for x in range(BOARD_WIDTH):
+                    self.set_led(buffer, x, 0, gold)
+                    self.set_led(buffer, x, 31, gold)
+                for y in range(32):
+                    self.set_led(buffer, 0, y, gold)
+                    self.set_led(buffer, 15, y, gold)
+                wt = self.winner_team
+                if wt == 1:
+                    for x in range(1, 15):
+                        for y in range(2, 15):
+                            self.set_led(buffer, x, y, (60, 180, 90))
+                elif wt == 2:
+                    for x in range(1, 15):
+                        for y in range(17, 30):
+                            self.set_led(buffer, x, y, (70, 130, 220))
                 return buffer
 
             self._process_reset_corners()
@@ -822,10 +947,10 @@ class DualUI:
             justify=tk.CENTER,
         ).pack(fill=tk.X, pady=(0, 10))
 
-        status_frame = tk.Frame(inner, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1)
-        status_frame.pack(fill=tk.X, pady=(0, 16))
+        self.status_frame = tk.Frame(inner, bg=KEY_CARD, highlightbackground=KEY_BORDER, highlightthickness=1)
+        self.status_frame.pack(fill=tk.X, pady=(0, 16))
         self.status = tk.Label(
-            status_frame,
+            self.status_frame,
             text="Choose player count, then Start game.",
             font=self._font_ui,
             fg=KEY_WARN,
@@ -996,10 +1121,88 @@ class DualUI:
             ky = max(32, sh - kh - 32)
         self.win_key.geometry(f"{kw}x{kh}+{kx}+{ky}")
 
+        self._score_fg_idle = KEY_TEXT
+        self._status_border_idle = KEY_BORDER
+        self._anim_after_id: Optional[str] = None
+        self._word_phase = 0.0
+        self._guess_phase = 0.0
+        self._ui_score_prev: Tuple[int, int] = (0, 0)
+        self._score_flash_until = 0.0
+        self._status_glow_until = 0.0
+        self._game_over_popup_shown = False
+
         self.win_word.protocol("WM_DELETE_WINDOW", self._quit)
         self.win_key.protocol("WM_DELETE_WINDOW", self._quit)
         self._sync_reset_sidebar()
         self._tick()
+        self._schedule_ui_anim()
+
+    def _schedule_ui_anim(self) -> None:
+        self._anim_after_id = self.root.after(45, self._ui_anim_tick)
+
+    def _pulse_status_border(self, duration: float = 0.65) -> None:
+        self._status_glow_until = max(self._status_glow_until, time.monotonic() + duration)
+
+    def _ui_anim_tick(self) -> None:
+        if not self.root.winfo_exists():
+            return
+        try:
+            if not self.win_word.winfo_exists() or not self.win_key.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        self._word_phase += 0.055
+        self._guess_phase += 0.11
+        now = time.monotonic()
+
+        with self.game.lock:
+            playing = self.game.state == "PLAYING"
+            game_over = self.game.state == "GAME_OVER"
+            cw = self.game.current_word
+            armed = self.game.active_guess_team
+
+        try:
+            if game_over:
+                wv = (math.sin(self._word_phase * 0.75) + 1.0) * 0.5
+                rgb = _blend_rgb((0xFF, 0xD7, 0x00), (0xFF, 0x8C, 0x42), wv)
+                self.lbl_word.config(fg=_rgb_hex(rgb))
+            elif playing and cw:
+                w = (math.sin(self._word_phase) + 1.0) * 0.5
+                rgb = _blend_rgb((0x3D, 0x8B, 0xFF), (0xA5, 0xE0, 0xFF), w)
+                self.lbl_word.config(fg=_rgb_hex(rgb))
+            else:
+                w = (math.sin(self._word_phase * 0.45) + 1.0) * 0.5
+                rgb = _blend_rgb((0x5C, 0x64, 0x6E), (0x9A, 0xA3, 0xAF), w)
+                self.lbl_word.config(fg=_rgb_hex(rgb))
+
+            alert_txt = self.lbl_word_guess_alert.cget("text")
+            if armed is not None and alert_txt:
+                g = (math.sin(self._guess_phase * 2.1) + 1.0) * 0.5
+                rgb = _blend_rgb((0xDA, 0x36, 0x33), (0xFF, 0x8B, 0x87), g)
+                self.lbl_word_guess_alert.config(fg=_rgb_hex(rgb))
+
+            if now < self._score_flash_until:
+                dur = 1.05
+                p = min(1.0, (self._score_flash_until - now) / dur)
+                rgb = _blend_rgb((0xC9, 0xD1, 0xD9), (0xFF, 0xC2, 0x6B), p)
+                fg = _rgb_hex(rgb)
+                self.lbl_scores.config(fg=fg)
+                self.lbl_word_scores.config(fg=fg)
+            else:
+                self.lbl_scores.config(fg=self._score_fg_idle)
+                self.lbl_word_scores.config(fg=self._score_fg_idle)
+
+            if now < self._status_glow_until:
+                u = min(1.0, (self._status_glow_until - now) / 0.65)
+                brd = _blend_rgb((0x30, 0x36, 0x3D), (0x58, 0xA6, 0xFF), u)
+                self.status_frame.config(highlightbackground=_rgb_hex(brd), highlightthickness=2)
+            else:
+                self.status_frame.config(highlightbackground=self._status_border_idle, highlightthickness=1)
+        except tk.TclError:
+            pass
+
+        self._schedule_ui_anim()
 
     def _ui_start_game(self) -> None:
         n = int(self.var_players.get())
@@ -1007,12 +1210,14 @@ class DualUI:
             n = 2
         self.game.start_game(n)
         self.status.config(text=f"Game on — {n} players.")
+        self._pulse_status_border()
 
     def _send_manual_word_ui(self) -> None:
         """Push the typed text to the drawer word (host); does not submit a team guess."""
         msg = self.game.set_manual_draw_word(self.entry.get())
         self.entry.delete(0, tk.END)
         self.status.config(text=msg)
+        self._pulse_status_border()
 
     def _skip_word(self) -> None:
         with self.game.lock:
@@ -1020,6 +1225,7 @@ class DualUI:
                 return
         self.game.new_word_manual()
         self.status.config(text="Skipped to next word.")
+        self._pulse_status_border()
 
     def _gui_reset(self, half: Optional[str]) -> None:
         with self.game.lock:
@@ -1027,12 +1233,14 @@ class DualUI:
             n = self.game.num_players
         if not playing:
             self.status.config(text="Start the game first.")
+            self._pulse_status_border(0.35)
             return
         self.game.gui_clear_canvas(half)
         if n == 2 or half is None:
             self.status.config(text="Mat cleared.")
         else:
             self.status.config(text=f"{half.title()} half cleared.")
+        self._pulse_status_border()
 
     def _sync_reset_sidebar(self) -> None:
         self.btn_reset_full.pack_forget()
@@ -1051,15 +1259,15 @@ class DualUI:
 
     def _sync_start_row(self) -> None:
         with self.game.lock:
-            playing = self.game.state == "PLAYING"
-        if playing:
-            self.btn_start.config(state=tk.DISABLED)
-            self.rb_2p.config(state=tk.DISABLED)
-            self.rb_4p.config(state=tk.DISABLED)
-        else:
+            st = self.game.state
+        if st == "LOBBY":
             self.btn_start.config(state=tk.NORMAL)
             self.rb_2p.config(state=tk.NORMAL)
             self.rb_4p.config(state=tk.NORMAL)
+        else:
+            self.btn_start.config(state=tk.DISABLED)
+            self.rb_2p.config(state=tk.DISABLED)
+            self.rb_4p.config(state=tk.DISABLED)
 
     def _arm(self, team: int) -> None:
         with self.game.lock:
@@ -1071,6 +1279,7 @@ class DualUI:
         self._sync_team2_button_visibility()
         self._sync_guess_buttons()
         self.status.config(text=f"Team {team} is guessing — type and press Enter to submit.")
+        self._pulse_status_border(0.8)
 
     def _sync_team2_button_visibility(self) -> None:
         with self.game.lock:
@@ -1113,8 +1322,100 @@ class DualUI:
         self.entry.delete(0, tk.END)
         self.status.config(text=msg)
         self._sync_guess_buttons()
+        self._pulse_status_border()
+
+    def _open_game_over_dialog(self) -> None:
+        if not self.root.winfo_exists():
+            return
+        with self.game.lock:
+            if self.game.state != "GAME_OVER":
+                return
+            wt = self.game.winner_team
+            s1, s2 = self.game.team_scores
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Game over — GuessTheGame")
+        dlg.configure(bg="#0d1117")
+        dlg.transient(self.win_key)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        title_font = tkfont.Font(family="Segoe UI", size=26, weight="bold")
+        tk.Label(
+            dlg,
+            text=f"Team {wt} wins!" if wt else "Game over",
+            font=title_font,
+            fg="#58a6ff",
+            bg="#0d1117",
+        ).pack(pady=(28, 6))
+        tk.Label(
+            dlg,
+            text=f"Reached {WIN_SCORE} points.",
+            font=("Segoe UI", 11),
+            fg="#8b949e",
+            bg="#0d1117",
+        ).pack()
+        tk.Label(
+            dlg,
+            text=f"Final scores  ·  Team 1: {s1}    Team 2: {s2}",
+            font=("Segoe UI", 12),
+            fg="#c9d1d9",
+            bg="#0d1117",
+        ).pack(pady=(18, 28))
+        row = tk.Frame(dlg, bg="#0d1117")
+        row.pack(pady=(0, 28))
+        tk.Button(
+            row,
+            text="Play again",
+            font=("Segoe UI", 11),
+            bg="#238636",
+            fg="white",
+            padx=18,
+            pady=10,
+            cursor="hand2",
+            command=lambda: self._game_over_play_again(dlg),
+        ).pack(side=tk.LEFT, padx=6)
+        tk.Button(
+            row,
+            text="Main menu",
+            font=("Segoe UI", 11),
+            bg="#30363d",
+            fg="#f0f6fc",
+            padx=18,
+            pady=10,
+            cursor="hand2",
+            command=lambda: self._game_over_main_menu(dlg),
+        ).pack(side=tk.LEFT, padx=6)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: self._game_over_main_menu(dlg))
+        _center_window_on_screen(dlg, 440, 280)
+
+    def _game_over_play_again(self, dlg: tk.Toplevel) -> None:
+        try:
+            dlg.grab_release()
+            dlg.destroy()
+        except tk.TclError:
+            pass
+        self._game_over_popup_shown = False
+        self.game.play_again()
+        self.status.config(text="New match — same player count.")
+        self._pulse_status_border()
+
+    def _game_over_main_menu(self, dlg: tk.Toplevel) -> None:
+        try:
+            dlg.grab_release()
+            dlg.destroy()
+        except tk.TclError:
+            pass
+        self._game_over_popup_shown = False
+        self.game.return_to_lobby()
+        self.status.config(text="Choose player count, then Start game.")
 
     def _quit(self) -> None:
+        if self._anim_after_id is not None:
+            try:
+                self.root.after_cancel(self._anim_after_id)
+            except tk.TclError:
+                pass
+            self._anim_after_id = None
+        stop_background_music()
         self.game.running = False
         self.root.quit()
 
@@ -1123,12 +1424,20 @@ class DualUI:
             return
         with self.game.lock:
             playing = self.game.state == "PLAYING"
+            game_over = self.game.state == "GAME_OVER"
             w = self.game.current_word if playing else "—"
             s1, s2 = self.game.team_scores
             armed = self.game.active_guess_team
-        self.lbl_word.config(
-            text=w.upper() if w != "—" else "Choose players in Keyboard window, then Start game",
-        )
+            winner = self.game.winner_team
+        if (s1, s2) != self._ui_score_prev:
+            self._ui_score_prev = (s1, s2)
+            self._score_flash_until = time.monotonic() + 1.05
+        if game_over and winner:
+            self.lbl_word.config(text=f"TEAM {winner} WINS!")
+        else:
+            self.lbl_word.config(
+                text=w.upper() if w != "—" else "Choose players in Keyboard window, then Start game",
+            )
         if armed is not None:
             self.lbl_word_guess_alert.config(
                 text=f"A team is guessing — stop! (Team {armed})",
@@ -1142,6 +1451,12 @@ class DualUI:
         self._sync_guess_buttons()
         self._sync_start_row()
         self._sync_reset_sidebar()
+        if game_over:
+            if not self._game_over_popup_shown:
+                self._game_over_popup_shown = True
+                self.root.after(80, self._open_game_over_dialog)
+        else:
+            self._game_over_popup_shown = False
         st = tk.NORMAL if playing else tk.DISABLED
         self.entry.config(state=st)
         self.btn_enter.config(state=st)
