@@ -5,6 +5,14 @@ import os, socket, sys, threading, time, random, queue, math, wave, ctypes
 import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
+import os
+import sys
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_EVILEYE_ROOT = os.path.dirname(_DIR)
+
+if _EVILEYE_ROOT not in sys.path:
+    sys.path.insert(0, _EVILEYE_ROOT)
 
 from Controller import (
     load_led_map,

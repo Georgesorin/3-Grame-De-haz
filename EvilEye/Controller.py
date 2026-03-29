@@ -1,13 +1,3 @@
-"""
-Evil Eye Light Controller – Python/Tkinter port of the WPF LightControlApp.
-
-Communicates with the Evil Eye hardware (or its simulator) using the same
-UDP protocol as the original C# application.
-
-Ports used:
-  Send light commands → device UDP :4626
-  Receive button events ← device UDP :7800
-"""
 
 import json
 import os
@@ -117,11 +107,6 @@ def map_logical_to_physical(led_map: dict, ch: int, led: int) -> tuple[int, int]
 def map_physical_to_logical(inv_map: dict, ch: int, led: int) -> tuple[int, int]:
     return inv_map.get((ch, led), (ch, led))
 
-UDP_DEVICE_PORT    = 4626   # send light commands to device
-UDP_RECEIVER_PORT  = 7800   # listen for button events from device
-NUM_CHANNELS       = 4
-LEDS_PER_CHANNEL   = 11     # 0 = Eye, 1-10 = Buttons
-FRAME_DATA_LEN     = LEDS_PER_CHANNEL * NUM_CHANNELS * 3   # 132 bytes
 
 PASSWORD_ARRAY = [
     35, 63, 187, 69, 107, 178, 92, 76, 39, 69, 205, 37, 223, 255, 165, 231,
@@ -260,7 +245,7 @@ class LightService:
         self._led_map_inv = build_input_inverse_led_map(self._led_map)
 
         # ── Sender ────────────────────────────────────────────────────────────
-        self._send_q      = queue.Queue(maxsize=4)
+        self._send_q      = queue.Queue(maxsize=4)   # cap to avoid stale frames
         self._sender_stop = threading.Event()
         self._sender_thr  = threading.Thread(target=self._sender_loop, daemon=True)
         self._sender_thr.start()
@@ -272,18 +257,19 @@ class LightService:
         self._poll_thr    = None
 
         # ── Receiver ──────────────────────────────────────────────────────────
-        self._recv_sock   = None
-        self._recv_thr    = None
+        self._recv_sock    = None
+        self._recv_thr     = None
         self._recv_running = False
-        self._bind_ip     = "0.0.0.0"
+        self._bind_ip      = "0.0.0.0"
 
         # Track previous button states in LOGICAL coordinates
-        self._prev_btn    = {}   # (logical_ch, logical_led) -> (is_triggered, is_disconnected)
+        self._prev_btn = {}   # (logical_ch, logical_led) -> (is_triggered, is_disconnected)
 
-        self.on_button_event  = None
-        self.on_status        = None
-        self.on_button_state  = None
+        self.on_button_event = None
+        self.on_status       = None
+        self.on_button_state = None
 
+    # ── LED map helpers ───────────────────────────────────────────────────────
     def reload_led_map(self):
         self._led_map = load_led_map()
         self._led_map_inv = build_input_inverse_led_map(self._led_map)
@@ -294,6 +280,78 @@ class LightService:
 
     def _map_in(self, ch: int, led: int) -> tuple[int, int]:
         return map_physical_to_logical(self._led_map_inv, ch, led)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+    def _log(self, msg):
+        if self.on_status:
+            self.on_status(msg)
+
+    def _next_seq(self):
+        with self._lock:
+            self._seq = (self._seq + 1) & 0xFFFF
+            return self._seq
+
+    # ── Sender thread ─────────────────────────────────────────────────────────
+    def _sender_loop(self):
+        """Dedicated sender – takes (ip, frame_data) from queue and sends."""
+        while not self._sender_stop.is_set():
+            try:
+                item = self._send_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            ip, frame_data = item
+            self._do_send_sequence(ip, frame_data)
+            self._send_q.task_done()
+
+    def _do_send_sequence(self, ip, frame_data):
+        seq = self._next_seq()
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            ep = (ip, self._device_port)
+            sock.sendto(build_start_packet(seq), ep)
+            time.sleep(0.008)
+            sock.sendto(build_fff0_packet(seq), ep)
+            time.sleep(0.008)
+            sock.sendto(build_command_packet(0x8877, 0x0000, frame_data, seq), ep)
+            time.sleep(0.008)
+            sock.sendto(build_end_packet(seq), ep)
+            sock.close()
+        except Exception as e:
+            self._log(f"Send error: {e}")
+
+    def _enqueue_frame(self):
+        """Snapshot LED states and push to the send queue (drop if full)."""
+        if not self._device_ip:
+            return
+        with self._lock:
+            states = dict(self._led_states)
+        frame = build_frame_data(states)
+        try:
+            self._send_q.put_nowait((self._device_ip, frame))
+        except queue.Full:
+            pass
+
+    # ── Poll thread ───────────────────────────────────────────────────────────
+    def _poll_loop(self):
+        while not self._poll_stop.is_set():
+            self._enqueue_frame()
+            self._poll_stop.wait(self._poll_rate / 1000.0)
+
+    # ── Public LED API ────────────────────────────────────────────────────────
+    def set_device(self, ip: str, port: int = 4626):
+        self._device_ip = ip
+        self._device_port = port
+        self._log(f"Device target set to {ip}:{port}")
+
+    def set_bind_ip(self, ip: str):
+        self._bind_ip = ip
+        self._log(f"Local bind IP set to {ip}")
+        if self._recv_running:
+            self.stop_receiver()
+            self.start_receiver()
 
     def set_led(self, channel, led, r, g, b):
         phys_ch, phys_led = self._map_out(channel, led)
@@ -315,6 +373,66 @@ class LightService:
         with self._lock:
             self._led_states = mapped
         self._enqueue_frame()
+
+    def all_off(self):
+        self.set_all(0, 0, 0)
+
+    # ── Polling control ───────────────────────────────────────────────────────
+    def start_polling(self):
+        if self._polling:
+            return
+        if not self._device_ip:
+            self._log("No device – cannot start polling")
+            return
+        self._polling = True
+        self._poll_stop.clear()
+        self._poll_thr = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thr.start()
+        self._log(f"Polling started at {self._poll_rate} ms")
+
+    def stop_polling(self):
+        if not self._polling:
+            return
+        self._polling = False
+        self._poll_stop.set()
+        self._poll_thr = None
+        self._log("Polling stopped")
+
+    def set_poll_rate(self, ms: int):
+        self._poll_rate = max(10, min(5000, ms))
+
+    def set_recv_port(self, port: int):
+        self._recv_port = port
+        self._log(f"Receiver port set to {port}")
+
+    # ── Receiver control ──────────────────────────────────────────────────────
+    def start_receiver(self):
+        if self._recv_running:
+            return
+        self._recv_running = True
+        self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._recv_sock.settimeout(0.5)
+        try:
+            bind_host = (self._bind_ip or "0.0.0.0").strip() or "0.0.0.0"
+            self._recv_sock.bind((bind_host, self._recv_port))
+            self._log(f"Receiver listening on {bind_host}:{self._recv_port}")
+        except Exception as e:
+            self._log(f"Receiver bind error: {e}")
+            self._recv_running = False
+            return
+        self._recv_thr = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thr.start()
+
+    def stop_receiver(self):
+        self._recv_running = False
+        if self._recv_sock:
+            try:
+                self._recv_sock.close()
+            except:
+                pass
+        self._log("Receiver stopped")
 
     def _recv_loop(self):
         EXPECTED = 687
@@ -393,13 +511,6 @@ class LightService:
             callback([])
             return
 
-        # Calculate broadcast
-        try:
-            import ipaddress, netifaces
-            # fallback: just broadcast
-        except:
-            pass
-        # Simple approach: broadcast on 255.255.255.255
         self._log(f"Sending discovery to 255.255.255.255:4626")
         try:
             sock.sendto(bytes(pkt), ("255.255.255.255", 4626))
@@ -425,7 +536,6 @@ class LightService:
         if not devices:
             devices.append({"ip": "169.254.15.67", "name": "Default (not discovered)"})
         callback(devices)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config persistence
@@ -503,9 +613,10 @@ class LightControlApp(tk.Tk):
         self._polling   = False
         self._receiving = False
         self._light_on_trigger = False
-        # (channel, led) -> (r, g, b)  – current local LED state shown in the grid
+
+        # (channel, led) -> (r, g, b) – current local LED state shown in the grid
         self._grid_colors = {}
-        # channel -> (canvas, oval_id)  for round eye widgets
+        # channel -> (canvas, oval_id) for round eye widgets
         self._eye_ovals = {}
 
         self._service.on_status       = self._on_status
@@ -513,18 +624,28 @@ class LightControlApp(tk.Tk):
         self._service.on_button_state = self._on_button_state
 
         if self._cfg.get("device_ip"):
-            self._service.set_device(self._cfg["device_ip"], self._cfg.get("udp_port", 4626))
-        
+            self._service.set_device(
+                self._cfg["device_ip"],
+                self._cfg.get("udp_port", 4626),
+            )
+
         self._service.set_recv_port(self._cfg.get("receiver_port", 7800))
         self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
-            
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
+        self._service.reload_led_map()
 
         self._build_ui()
 
-        # Auto-start based on config
+        if self._cfg.get("device_ip"):
+            self._lbl_device.configure(
+                text=f"Device: {self._cfg['device_ip']}",
+                fg="#0f0",
+            )
+
         if self._cfg.get("auto_start_streaming", False):
             self.after(500, self._toggle_connect)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     # ── Status callback (called from background thread) ──────────────────────
     def _on_status(self, msg):
@@ -539,8 +660,9 @@ class LightControlApp(tk.Tk):
                     if addr.family == socket.AF_INET:
                         if addr.address not in ips:
                             ips.append(addr.address)
-        except: pass
-        self._iface_combo['values'] = ips
+        except:
+            pass
+        self._iface_combo["values"] = ips
 
     def _on_iface_change(self, event=None):
         new_ip = self._iface_var.get()
@@ -549,12 +671,13 @@ class LightControlApp(tk.Tk):
         self._service.set_bind_ip(new_ip)
         self._log(f"Interface changed to {new_ip}")
 
-
     def _on_button_event(self, ch, triggered, disconnected, src_ip):
         ts = datetime.now().strftime("%H:%M:%S")
         parts = []
-        if triggered:    parts.append(f"triggered={triggered}")
-        if disconnected: parts.append(f"disconnected={disconnected}")
+        if triggered:
+            parts.append(f"triggered={triggered}")
+        if disconnected:
+            parts.append(f"disconnected={disconnected}")
         line = f"[{ts}] Wall {ch}: {', '.join(parts)}  (from {src_ip})\n"
         self.after(0, lambda: self._append_event(line))
 
@@ -569,374 +692,17 @@ class LightControlApp(tk.Tk):
 
         self.after(0, lambda: self._update_button_status(ch, led, status))
 
-        # Light-on-trigger: set LED on press, clear on release
         if self._light_on_trigger:
             if is_triggered:
                 r, g, b = self._get_rgb()
                 self._service.set_led(ch, led, r, g, b)
-                self.after(0, lambda c=ch, l=led, rv=r, gv=g, bv=b:
-                           self._set_btn_color(c, l, rv, gv, bv))
-            elif not is_disconnected:  # released back to idle
+                self.after(
+                    0,
+                    lambda c=ch, l=led, rv=r, gv=g, bv=b: self._set_btn_color(c, l, rv, gv, bv),
+                )
+            elif not is_disconnected:
                 self._service.set_led(ch, led, 0, 0, 0)
                 self.after(0, lambda c=ch, l=led: self._set_btn_color(c, l, 0, 0, 0))
-
-    # ── UI Build ─────────────────────────────────────────────────────────────
-    def _build_ui(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("Dark.TFrame", background="#1a1a1a")
-
-        # ── Top toolbar ──
-        toolbar = tk.Frame(self, bg="#2a2a2a", height=44)
-        toolbar.pack(fill=tk.X)
-
-        self._btn_config   = self._tb_btn(toolbar, "⚙ Config",            self._open_config)
-        self._btn_connect  = self._tb_btn(toolbar, "▶ START STREAM",      self._toggle_connect)
-        self._btn_lw_trig  = self._tb_btn(toolbar, "💡 Light On Trigger",   self._toggle_light_on_trigger, bg="#555")
-        self._btn_all_off  = self._tb_btn(toolbar, "⬛ All Off",           self._all_off, bg="#333")
-
-        # Network Interface Selector
-        tk.Label(toolbar, text="Net Interface:", bg="#2a2a2a", fg="#888", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(10, 2))
-        self._iface_var = tk.StringVar(value=self._cfg.get("virtual_iface_ip", "0.0.0.0"))
-        self._iface_combo = ttk.Combobox(toolbar, textvariable=self._iface_var, width=15, state="readonly")
-        self._iface_combo.pack(side=tk.LEFT, padx=5, pady=8)
-        self._update_iface_list()
-        self._iface_combo.bind("<<ComboboxSelected>>", self._on_iface_change)
-
-        self.bind("<F11>", lambda e: self.attributes("-fullscreen", not self.attributes("-fullscreen")))
-        self.bind("<Escape>", lambda e: self.attributes("-fullscreen", False))
-
-        self._lbl_device = tk.Label(toolbar, text="No device", bg="#2a2a2a", fg="#aaa", font=("Consolas", 9))
-        self._lbl_device.pack(side=tk.RIGHT, padx=10)
-
-        # ── Notebook (tabs) ──
-        nb = ttk.Notebook(self)
-        nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
-        tab_ctrl = tk.Frame(nb, bg="#1a1a1a")
-        tab_log  = tk.Frame(nb, bg="#111")
-        nb.add(tab_ctrl, text=" 🎛 LED Control ")
-        nb.add(tab_log,  text=" 📋 Events Log  ")
-
-        self._build_control_tab(tab_ctrl)
-        self._build_log_tab(tab_log)
-
-        # ── Status bar ──
-        sb = tk.Frame(self, bg="#111", height=22)
-        sb.pack(fill=tk.X, side=tk.BOTTOM)
-        self._status_lbl = tk.Label(sb, text="Ready", bg="#111", fg="#0f0", font=("Consolas", 8), anchor="w")
-        self._status_lbl.pack(fill=tk.X, padx=6)
-
-    def _tb_btn(self, parent, text, cmd, bg="#444"):
-        b = tk.Button(parent, text=text, command=cmd,
-                      bg=bg, fg="white", font=("Consolas", 9, "bold"),
-                      relief="flat", padx=10, pady=8, cursor="hand2",
-                      activebackground="#666", activeforeground="white")
-        b.pack(side=tk.LEFT, padx=2, pady=4)
-        return b
-
-    def _build_control_tab(self, parent):
-        # ── Left: colour picker + quick presets ──
-        left = tk.Frame(parent, bg="#222", width=220)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 4), pady=8)
-        left.pack_propagate(False)
-
-        tk.Label(left, text="COLOUR PICKER", bg="#222", fg="#ff4444",
-                 font=("Consolas", 10, "bold")).pack(pady=(10, 4))
-
-        self._preview = tk.Canvas(left, width=180, height=60, bg="black",
-                                  highlightthickness=2, highlightbackground="#444")
-        self._preview.pack(pady=4)
-        self._preview_rect = self._preview.create_rectangle(2, 2, 178, 58, fill="black", outline="")
-
-        for label, var_name, row_col in [("R", "_sv_r", "#ff5555"),
-                                          ("G", "_sv_g", "#55ff55"),
-                                          ("B", "_sv_b", "#5555ff")]:
-            f = tk.Frame(left, bg="#222")
-            f.pack(fill=tk.X, padx=8, pady=2)
-            tk.Label(f, text=label, bg="#222", fg=row_col, font=("Consolas", 9, "bold"), width=2).pack(side=tk.LEFT)
-            sv = tk.StringVar(value="0")
-            setattr(self, var_name, sv)
-            sld = tk.Scale(f, from_=0, to=255, orient=tk.HORIZONTAL, variable=sv,
-                           bg="#222", fg=row_col, troughcolor="#333",
-                           highlightthickness=0, sliderlength=14, command=lambda _: self._update_preview())
-            sld.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            ent = tk.Entry(f, textvariable=sv, width=4, bg="#111", fg="white",
-                           font=("Consolas", 9), insertbackground="white")
-            ent.pack(side=tk.LEFT, padx=(2, 0))
-
-        tk.Label(left, text="QUICK PRESETS", bg="#222", fg="#888",
-                 font=("Consolas", 8, "bold")).pack(pady=(14, 4))
-
-        presets = [
-            ("■ Red",    255,   0,   0, "#ff2222"),
-            ("■ Green",    0, 255,   0, "#22ff22"),
-            ("■ Blue",     0,   0, 255, "#2222ff"),
-            ("■ White",  255, 255, 255, "#eeeeee"),
-            ("■ Yellow", 255, 255,   0, "#ffff22"),
-            ("■ Purple", 128,   0, 128, "#cc44cc"),
-        ]
-        for txt, r, g, b, col in presets:
-            self._preset_btn(left, txt, r, g, b, col)
-
-        tk.Label(left, text="ALL WALLS", bg="#222", fg="#888",
-                 font=("Consolas", 8, "bold")).pack(pady=(14, 4))
-        tk.Button(left, text="Set All to Colour", command=self._all_on,
-                  bg="#335", fg="white", font=("Consolas", 9, "bold"),
-                  relief="flat", padx=8, pady=6, cursor="hand2").pack(fill=tk.X, padx=8, pady=2)
-        tk.Button(left, text="⬛ All Off", command=self._all_off,
-                  bg="#333", fg="white", font=("Consolas", 9, "bold"),
-                  relief="flat", padx=8, pady=6, cursor="hand2").pack(fill=tk.X, padx=8, pady=2)
-
-        # ── Right: LED grid ──
-        right = tk.Frame(parent, bg="#1a1a1a")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=8)
-
-        self._led_buttons = {}   # (ch, led) -> tk.Button
-        self._led_status  = {}   # (ch, led) -> status label
-
-        walls_frame = tk.Frame(right, bg="#1a1a1a")
-        walls_frame.pack(fill=tk.BOTH, expand=True)
-        walls_frame.grid_rowconfigure(0, weight=1)
-        walls_frame.grid_rowconfigure(1, weight=1)
-        walls_frame.grid_columnconfigure(0, weight=1)
-        walls_frame.grid_columnconfigure(1, weight=1)
-
-        for ch in range(1, NUM_CHANNELS + 1):
-            row = (ch - 1) // 2
-            col = (ch - 1) % 2
-
-            wf = tk.LabelFrame(walls_frame, text=f" WALL {ch} ",
-                                bg="#1a1a1a", fg="#ff4444",
-                                font=("Consolas", 11, "bold"),
-                                padx=10, pady=10, borderwidth=2, relief="groove")
-            wf.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
-
-            # Eye — circular Canvas
-            e_frame = tk.Frame(wf, bg="#1a1a1a")
-            e_frame.pack(fill=tk.X, pady=4)
-
-            eye_cv = tk.Canvas(e_frame, width=60, height=60,
-                               bg="#1a1a1a", highlightthickness=0)
-            eye_cv.pack(side=tk.LEFT, padx=4)
-            eye_oval = eye_cv.create_oval(3, 3, 57, 57,
-                                          fill="#111", outline="#ff0000", width=3)
-            eye_cv.bind("<Button-1>", lambda e, c=ch: self._on_led_click(c, 0))
-            self._eye_ovals[ch] = (eye_cv, eye_oval)
-
-            eye_info = tk.Frame(e_frame, bg="#1a1a1a")
-            eye_info.pack(side=tk.LEFT, padx=4)
-            tk.Label(eye_info, text="\U0001f441 EYE", bg="#1a1a1a", fg="white",
-                     font=("Consolas", 9, "bold")).pack(anchor="w")
-            eye_st = tk.Label(eye_info, text="idle", bg="#1a1a1a", fg="#555",
-                              font=("Consolas", 7), width=9, anchor="w")
-            eye_st.pack(anchor="w")
-            self._led_status[(ch, 0)] = eye_st
-
-            # Buttons 1-10 in 2 rows × 5 cols  (each cell = button + status label)
-            bf = tk.Frame(wf, bg="#1a1a1a")
-            bf.pack(fill=tk.BOTH, expand=True)
-            for r_i in range(2): bf.grid_rowconfigure(r_i, weight=1)
-            for c_i in range(5): bf.grid_columnconfigure(c_i, weight=1)
-            for i in range(1, 11):
-                r = (i - 1) // 5
-                c2 = (i - 1) % 5
-                cell = tk.Frame(bf, bg="#1a1a1a")
-                cell.grid(row=r, column=c2, padx=2, pady=2, sticky="nsew")
-                btn = tk.Button(
-                    cell, text=str(i), width=4, height=2,
-                    bg="#111", fg="#555", font=("Consolas", 9, "bold"),
-                    relief="flat", cursor="hand2",
-                    command=lambda ch_=ch, idx=i: self._on_led_click(ch_, idx)
-                )
-                btn.pack(fill=tk.BOTH, expand=True)
-                lbl = tk.Label(cell, text="idle", bg="#1a1a1a", fg="#555",
-                               font=("Consolas", 7), width=9, anchor="w")
-                lbl.pack()
-                self._led_buttons[(ch, i)] = btn
-                self._led_status[(ch, i)]  = lbl
-
-    def _preset_btn(self, parent, text, r, g, b, fg_col):
-        def apply():
-            self._sv_r.set(str(r))
-            self._sv_g.set(str(g))
-            self._sv_b.set(str(b))
-            self._update_preview()
-        tk.Button(parent, text=text, command=apply,
-                  bg="#1a1a1a", fg=fg_col, font=("Consolas", 9),
-                  relief="flat", padx=6, pady=3, cursor="hand2",
-                  anchor="w").pack(fill=tk.X, padx=8, pady=1)
-
-    def _build_log_tab(self, parent):
-        tk.Label(parent, text="BUTTON EVENTS", bg="#111", fg="#888",
-                 font=("Consolas", 9, "bold")).pack(fill=tk.X, padx=4, pady=2)
-
-        self._events_text = scrolledtext.ScrolledText(
-            parent, bg="#0a0a0a", fg="#00ff88",
-            font=("Consolas", 9), state="disabled", borderwidth=0
-        )
-        self._events_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
-
-        tk.Button(parent, text="Clear", command=self._clear_events,
-                  bg="#333", fg="white", font=("Consolas", 9),
-                  relief="flat", padx=10, pady=4).pack(pady=4)
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-    def _get_rgb(self):
-        try:
-            r = max(0, min(255, int(self._sv_r.get())))
-            g = max(0, min(255, int(self._sv_g.get())))
-            b = max(0, min(255, int(self._sv_b.get())))
-        except:
-            r, g, b = 0, 0, 0
-        return r, g, b
-
-    def _update_preview(self):
-        r, g, b = self._get_rgb()
-        col = rgb_hex(r, g, b)
-        self._preview.itemconfig(self._preview_rect, fill=col)
-
-    def _on_led_click(self, channel, led):
-        r, g, b = self._get_rgb()
-        self._service.set_led(channel, led, r, g, b)
-        self._set_btn_color(channel, led, r, g, b)
-        self._log(f"Set Wall {channel}, LED {led} → RGB({r},{g},{b})")
-
-    def _set_btn_color(self, ch, led, r, g, b):
-        self._grid_colors[(ch, led)] = (r, g, b)
-        if led == 0:  # Eye — update canvas oval
-            if ch in self._eye_ovals:
-                cv, oval_id = self._eye_ovals[ch]
-                fill    = f"#{r:02x}{g:02x}{b:02x}" if (r or g or b) else "#111"
-                outline = fill if (r or g or b) else "#ff0000"
-                cv.itemconfig(oval_id, fill=fill, outline=outline)
-        else:
-            if (ch, led) not in self._led_buttons:
-                return
-            btn = self._led_buttons[(ch, led)]
-            if r == g == b == 0:
-                btn.configure(bg="#111", fg="#555")
-            else:
-                hex_c = rgb_hex(r, g, b)
-                btn.configure(bg=hex_c, fg=contrasting_text(r, g, b))
-
-    def _update_button_status(self, ch, led, status):
-        st_map = {"triggered": ("triggered", "#00ff00"),
-                  "disconnected": ("disc.",     "#ff4444"),
-                  "idle":         ("idle",       "#555")}
-        text, fg = st_map.get(status, ("idle", "#555"))
-
-        if led == 0:  # Eye — update oval outline colour
-            if ch in self._eye_ovals:
-                cv, oval_id = self._eye_ovals[ch]
-                if status == "triggered":
-                    cv.itemconfig(oval_id, outline="#00ff00")
-                elif status == "disconnected":
-                    cv.itemconfig(oval_id, outline="#ff4444")
-                else:
-                    r, g, b = self._grid_colors.get((ch, 0), (0, 0, 0))
-                    cv.itemconfig(oval_id,
-                                  outline="#ff0000" if not (r or g or b)
-                                          else f"#{r:02x}{g:02x}{b:02x}")
-        else:  # Regular button — highlight border & add T marker
-            if (ch, led) in self._led_buttons:
-                btn = self._led_buttons[(ch, led)]
-                if status == "triggered":
-                    btn.configure(text=f"{led} [T]", highlightbackground="#00ff00", highlightthickness=2)
-                elif status == "disconnected":
-                    btn.configure(text=f"{led} [X]", highlightbackground="#ff4444", highlightthickness=2)
-                else:
-                    btn.configure(text=str(led), highlightthickness=0)
-
-        # Update status label for all LEDs
-        if (ch, led) in self._led_status and self._led_status[(ch, led)]:
-            self._led_status[(ch, led)].configure(text=text, fg=fg)
-
-    def _all_on(self):
-        r, g, b = self._get_rgb()
-        self._service.set_all(r, g, b)
-        for ch in range(1, NUM_CHANNELS + 1):
-            for led in range(LEDS_PER_CHANNEL):
-                self._set_btn_color(ch, led, r, g, b)
-        self._log(f"All lights → RGB({r},{g},{b})")
-
-    def _all_off(self):
-        self._service.all_off()
-        for ch in range(1, NUM_CHANNELS + 1):
-            for led in range(LEDS_PER_CHANNEL):
-                self._set_btn_color(ch, led, 0, 0, 0)
-        self._log("All lights off")
-
-    def _toggle_connect(self):
-        """Start/stop both the receiver AND polling together."""
-        connected = self._receiving or self._polling
-        if connected:
-            self._service.stop_receiver()
-            self._service.stop_polling()
-            self._receiving = False
-            self._polling   = False
-            self._btn_connect.configure(text="▶ START STREAM", bg="green")
-            self._log("Disconnected (receiver + polling stopped)")
-        else:
-            if not self._cfg.get("device_ip"):
-                messagebox.showwarning("No Device", "Set a device IP in Config first.")
-                return
-            self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
-            self._service.start_receiver()
-            self._service.start_polling()
-            self._receiving = True
-            self._polling   = True
-            self._btn_connect.configure(text="🛑 STOP STREAM", bg="red")
-            self._log("Connected: polling + receiver active")
-
-    def _toggle_light_on_trigger(self):
-        self._light_on_trigger = not self._light_on_trigger
-        if self._light_on_trigger:
-            self._btn_lw_trig.configure(bg="#4a4", text="💡 Light On Trigger: ON")
-            self._service.all_off()
-            for ch in range(1, NUM_CHANNELS + 1):
-                for led in range(LEDS_PER_CHANNEL):
-                    self._set_btn_color(ch, led, 0, 0, 0)
-        else:
-            self._btn_lw_trig.configure(bg="#555", text="💡 Light On Trigger")
-
-    def _open_config(self):
-        ConfigDialog(self, self._cfg, self._service, self._on_config_saved)
-
-    def _on_config_saved(self, new_cfg):
-        self._cfg = new_cfg
-        save_config(new_cfg)
-        if new_cfg.get("device_ip"):
-            self._service.set_device(new_cfg["device_ip"], new_cfg.get("udp_port", 4626))
-            self._lbl_device.configure(text=f"Device: {new_cfg['device_ip']}", fg="#0f0")
-        self._service.set_recv_port(new_cfg.get("receiver_port", 7800))
-        self._service.set_bind_ip(receiver_bind_ip_from_config(new_cfg))
-        self._service.set_poll_rate(new_cfg.get("polling_rate_ms", 100))
-        self._service.reload_led_map()
-        self._log("Configuration saved")
-
-    def _log(self, msg):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._status_lbl.configure(text=f"[{ts}] {msg}")
-
-    def _append_event(self, line):
-        self._events_text.configure(state="normal")
-        self._events_text.insert(tk.END, line)
-        self._events_text.see(tk.END)
-        self._events_text.configure(state="disabled")
-
-    def _clear_events(self):
-        self._events_text.configure(state="normal")
-        self._events_text.delete("1.0", tk.END)
-        self._events_text.configure(state="disabled")
-
-    def destroy(self):
-        self._service.stop_polling()
-        self._service.stop_receiver()
-        super().destroy()
-
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration Dialog
 # ─────────────────────────────────────────────────────────────────────────────
@@ -952,8 +718,11 @@ class ConfigDialog(tk.Toplevel):
         self._service = service
         self._on_save = on_save
 
+        self._sv_ip   = tk.StringVar(value=cfg.get("device_ip", ""))
+        self._sv_udp  = tk.StringVar(value=str(cfg.get("udp_port", 4626)))
+        self._sv_recv = tk.StringVar(value=str(cfg.get("receiver_port", 7800)))
+        self._sv_poll = tk.StringVar(value=str(cfg.get("polling_rate_ms", 100)))
         self._sv_auto_stream = tk.BooleanVar(value=cfg.get("auto_start_streaming", False))
-
         self._build()
 
     def _build(self):

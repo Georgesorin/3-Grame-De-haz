@@ -75,13 +75,7 @@ assert logical_rgb_to_wire_grb(1, 2, 3) == (2, 1, 3)
 
 
 class MirroringLightService(LightService):
-    """Send each LED frame to the configured device and, when that is not loopback,
-    also to 127.0.0.1 so EvilEye Simulator on the same PC receives the same packets
-    (hardware IP in eye_ctrl_config.json does not need to match the sim).
 
-    set_led(..., r, g, b) is logical RGB; frames use GRB via build_frame_data /
-    logical_rgb_to_wire_grb.
-    """
 
     _LOCAL_TARGETS = frozenset({"127.0.0.1", "localhost"})
 

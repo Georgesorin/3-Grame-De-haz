@@ -1,25 +1,4 @@
-"""
-hot_potato.py – Hot Potato Team Game for Evil Eye LED hardware.
 
-Mechanics
-─────────
-• 2-minute game clock.
-• Hot potato (one red LED) appears on the current holder's wall(s).
-• Holder has 5–10 s to press it → +1 pt, potato passes to a random other team.
-• Fail to press in time → −1 pt, potato passes anyway.
-• LEDs flicker faster as the game clock runs down (< 30 s).
-• When time's up, whoever holds the potato loses HALF their score.
-
-Wall assignment
-───────────────
-• 2 teams  → A: walls 1+2,  B: walls 3+4
-• 3 teams  → A: wall 1,     B: wall 2,  C: walls 3+4
-• 4 teams  → A: wall 1,     B: wall 2,  C: wall 3,  D: wall 4
-
-Run:  python hot_potato.py
-
-LED colours in code are logical (R, G, B). UDP frames use GRB via Controller.logical_rgb_to_wire_grb.
-"""
 
 import os
 import sys
@@ -737,4 +716,7 @@ class HotPotatoApp(tk.Tk):
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import evil_eye_network_setup
+
+    evil_eye_network_setup.run_startup_discovery_and_save_config()
     HotPotatoApp().mainloop()
