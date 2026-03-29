@@ -1,16 +1,3 @@
-"""
-Color Rush – Evil Eye LED hardware.
-
-Each wall lights exactly five buttons (one color each) and leaves five dark.
-A target palette color is chosen each round. Rounds alternate:
-  • Press round — first press on the target color scores.
-  • Avoid round — first press on any other *lit* color scores; target is forbidden.
-Auto-refresh uses a deadline that resets to the full interval on each correct score.
-The interval shortens a little after every layout change (timer or score round).
-First team to 20 points wins and ends the game.
-
-Run:  python ColorTest.py
-"""
 
 import os, sys, random, threading, time, math
 import tkinter as tk
@@ -48,6 +35,9 @@ def _play_music_blocking(path, stop_event_callable):
     """
     Block until the given mp3 finishes or stop_event_callable() is true.
     Safe to call from a worker thread. No-op if pygame or file is missing.
+
+    Uses mixer.Sound (not mixer.music): on Windows, music streams often fail
+    when played from background threads; Sound matches palette clips and FIRE's behavior.
     """
     if _pygame is None:
         return
@@ -61,29 +51,36 @@ def _play_music_blocking(path, stop_event_callable):
         print("Color Rush: mixer init (narration):", e, file=sys.stderr)
         return
     try:
-        _pygame.mixer.music.load(path)
-        _pygame.mixer.music.play()
-        while _pygame.mixer.music.get_busy():
+        snd = _pygame.mixer.Sound(path)
+        ch = _pygame.mixer.find_channel(True)
+        if ch is None:
+            ch = _pygame.mixer.Channel(0)
+        ch.play(snd)
+        while ch.get_busy():
             if stop_event_callable():
-                _pygame.mixer.music.stop()
-                break
-            _pygame.time.wait(80)
+                ch.stop()
+                return
+            _pygame.time.wait(30)
     except Exception as e:
         print("Color Rush: narration playback:", e, file=sys.stderr)
-        try:
-            _pygame.mixer.music.stop()
-        except Exception:
-            pass
-if _DIR not in sys.path:
-    sys.path.insert(0, _DIR)
+# Controller.py lives in parent EvilEye/, not ColorGame/
+_EVILEYE_ROOT = os.path.dirname(_DIR)
+if _EVILEYE_ROOT not in sys.path:
+    sys.path.insert(0, _EVILEYE_ROOT)
 
-from Controller import LightService, load_config, save_config
+from Controller import LightService, load_config, logical_rgb_to_wire_grb, receiver_bind_ip_from_config
+
+# Logical RGB in set_led / palette tuples → GRB in UDP frames (shared with Fire).
+assert logical_rgb_to_wire_grb(1, 2, 3) == (2, 1, 3)
 
 
 class MirroringLightService(LightService):
     """Send each LED frame to the configured device and, when that is not loopback,
     also to 127.0.0.1 so EvilEye Simulator on the same PC receives the same packets
     (hardware IP in eye_ctrl_config.json does not need to match the sim).
+
+    set_led(..., r, g, b) is logical RGB; frames use GRB via build_frame_data /
+    logical_rgb_to_wire_grb.
     """
 
     _LOCAL_TARGETS = frozenset({"127.0.0.1", "localhost"})
@@ -121,6 +118,7 @@ TEAM_HEX        = ["#ff3c00","#0064ff","#00d23c","#c800c8"]
 TEAM_NAMES_DEF  = ["TEAM A","TEAM B","TEAM C","TEAM D"]
 
 # Fixed 5-color palette (indices 0..4); five random LEDs per wall get one color each.
+# Tuples are logical (R, G, B). Frames use GRB (Controller.logical_rgb_to_wire_grb).
 PALETTE_5 = [
     (255, 0, 0),
     (0, 255, 0),
@@ -598,6 +596,7 @@ class ColorRushApp(tk.Tk):
         recv = int(self._cfg.get("receiver_port", 7800))
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
+        self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
         self._service.start_receiver()
         self._service.start_polling()
@@ -626,7 +625,10 @@ class ColorRushApp(tk.Tk):
 
         self._build_setup()
         self._build_game()
+        self._scores_win = None
+        self._build_scores_window()
         self._show_setup()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.after(60, self._ambient_tick)
 
     def _show_setup(self):
@@ -896,22 +898,6 @@ class ColorRushApp(tk.Tk):
         self._game_status = tk.Label(btm, text="", bg=BG_MID, fg=FG_DIM, font=FONT_XS)
         self._game_status.pack(pady=(0, 8))
 
-        sb_wrap = tk.Frame(f, bg=BG_MID)
-        sb_wrap.pack(fill=tk.X, pady=(0, 4))
-        self._score_bar = tk.Frame(sb_wrap, bg=BG_MID)
-        self._score_bar.pack(anchor=tk.CENTER)
-        self._score_panels = []
-        for i in range(MAX_TEAMS):
-            pf = tk.Frame(self._score_bar, bg=BG_PANEL, padx=12, pady=8,
-                          highlightthickness=0)
-            nl = tk.Label(pf, text=TEAM_NAMES_DEF[i], bg=BG_PANEL,
-                          fg=TEAM_HEX[i], font=("Consolas", 10, "bold"))
-            nl.pack()
-            sl = tk.Label(pf, text="0 pts", bg=BG_PANEL, fg=FG_MAIN,
-                          font=("Consolas", 18, "bold"))
-            sl.pack()
-            self._score_panels.append((pf, nl, sl))
-
         main = tk.Frame(f, bg=BG_DARK)
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         main.grid_rowconfigure(0, weight=1)
@@ -969,6 +955,87 @@ class ColorRushApp(tk.Tk):
             font=("Consolas", 8),
         )
         self._lbl_palette_names.pack(anchor=tk.CENTER, pady=(4, 0))
+
+    def _build_scores_window(self):
+        w = tk.Toplevel(self)
+        w.title("Color Rush – Scores")
+        w.configure(bg=BG_DARK)
+        w.minsize(320, 120)
+        w.transient(self)
+
+        def place_scores_window():
+            try:
+                self.update_idletasks()
+                rx, ry = self.winfo_rootx(), self.winfo_rooty()
+                rw = self.winfo_width()
+                w.geometry(f"+{rx + rw + 12}+{ry}")
+            except tk.TclError:
+                pass
+
+        place_scores_window()
+
+        hdr = tk.Frame(w, bg=BG_MID, pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(
+            hdr,
+            text="Scores",
+            bg=BG_MID,
+            fg=FG_GOLD,
+            font=("Consolas", 12, "bold"),
+        ).pack()
+
+        body = tk.Frame(w, bg=BG_DARK, padx=12, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        self._score_bar = tk.Frame(body, bg=BG_DARK)
+        self._score_bar.pack(anchor=tk.CENTER)
+
+        self._score_panels = []
+        for i in range(MAX_TEAMS):
+            pf = tk.Frame(self._score_bar, bg=BG_PANEL, padx=12, pady=8,
+                          highlightthickness=0)
+            nl = tk.Label(pf, text=TEAM_NAMES_DEF[i], bg=BG_PANEL,
+                          fg=TEAM_HEX[i], font=("Consolas", 10, "bold"))
+            nl.pack()
+            sl = tk.Label(pf, text="0 pts", bg=BG_PANEL, fg=FG_MAIN,
+                          font=("Consolas", 18, "bold"))
+            sl.pack()
+            self._score_panels.append((pf, nl, sl))
+
+        def on_scores_close():
+            w.withdraw()
+
+        w.protocol("WM_DELETE_WINDOW", on_scores_close)
+        self._scores_win = w
+        w.withdraw()
+
+    def _scores_show(self):
+        if self._scores_win is None:
+            return
+        try:
+            self.update_idletasks()
+            rx, ry = self.winfo_rootx(), self.winfo_rooty()
+            rw = self.winfo_width()
+            self._scores_win.geometry(f"+{rx + rw + 12}+{ry}")
+            self._scores_win.deiconify()
+            self._scores_win.lift()
+        except tk.TclError:
+            pass
+
+    def _scores_hide(self):
+        if self._scores_win is None:
+            return
+        try:
+            self._scores_win.withdraw()
+        except tk.TclError:
+            pass
+
+    def _on_app_close(self):
+        try:
+            if self._scores_win is not None:
+                self._scores_win.destroy()
+        except tk.TclError:
+            pass
+        self.destroy()
 
     # ── Updates ───────────────────────────────────────────────────────────────
     def _update_panels(self, scores, num_teams, highlight=-1, pulse_highlight=False):
@@ -1040,14 +1107,16 @@ class ColorRushApp(tk.Tk):
             recv = int(self._cfg.get("receiver_port", 7800))
         except (TypeError, ValueError):
             udp, recv = 4626, 7800
-        prev_recv = self._service._recv_port
-        if recv != prev_recv:
+        bind = receiver_bind_ip_from_config(self._cfg)
+        was_running = self._service._recv_running
+        if was_running:
             self._service.stop_receiver()
         self._service.set_device(ip, udp)
         self._service.set_recv_port(recv)
-        if recv != prev_recv:
+        self._service.set_bind_ip(bind)
+        if was_running:
             self._service.start_receiver()
-        self._set_status(f"{ip}:{udp}  ·  listen {recv}")
+        self._set_status(f"{ip}:{udp}  ·  recv {recv} @ {bind}")
 
     def _start_game(self):
         self._cfg = load_config()
@@ -1081,6 +1150,7 @@ class ColorRushApp(tk.Tk):
         self._lbl_mode_banner.configure(text="", fg=FG_DIM)
         n = s["num_teams"]
         self._update_panels([0] * n, n, highlight=-1)
+        self._scores_show()
         self._show_game()
 
     def _stop_game(self):
@@ -1094,6 +1164,7 @@ class ColorRushApp(tk.Tk):
         self._score_pop_id += 1
         self._victory_fx_id += 1
         self._game.stop_game()
+        self._scores_hide()
         self._show_setup()
 
     def _set_status(self, msg):
@@ -1105,4 +1176,7 @@ class ColorRushApp(tk.Tk):
 
 
 if __name__ == "__main__":
+    import evil_eye_network_setup
+
+    evil_eye_network_setup.run_startup_discovery_and_save_config()
     ColorRushApp().mainloop()

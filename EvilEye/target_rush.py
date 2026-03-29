@@ -16,6 +16,8 @@ Wall assignment
 • 4 teams  → one wall each
 
 Run:  python target_rush.py
+
+LED colours in code are logical (R, G, B). UDP frames use GRB via Controller.logical_rgb_to_wire_grb.
 """
 
 import os, sys, random, threading, time
@@ -25,7 +27,16 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
-from Controller import LightService, load_config, save_config, LEDS_PER_CHANNEL
+from Controller import (
+    LightService,
+    load_config,
+    logical_rgb_to_wire_grb,
+    receiver_bind_ip_from_config,
+    save_config,
+    LEDS_PER_CHANNEL,
+)
+
+assert logical_rgb_to_wire_grb(1, 2, 3) == (2, 1, 3)
 
 MAX_TEAMS = 4
 MIN_TEAMS = 2
@@ -47,11 +58,12 @@ DIFF_PRESETS = {
     "hard":   {"start_targets": 2, "start_time": 2.5, "min_time": 1.0, "step_hits": 3, "max_targets": 3},
 }
 
+# Logical RGB; LightService encodes GRB on the wire.
 TEAM_COLORS_RGB = [(255,60,0),(0,100,255),(0,210,60),(200,0,200)]
 TEAM_HEX        = ["#ff3c00","#0064ff","#00d23c","#c800c8"]
 TEAM_NAMES_DEF  = ["TEAM A","TEAM B","TEAM C","TEAM D"]
 
-RED   = (255,0,0)
+RED   = (255,0,0)   # logical RGB for set_led
 GREEN = (0,255,0)
 OFF   = (0,0,0)
 
@@ -110,6 +122,8 @@ def _seg_btn(parent, text, var, value, **kw):
 # Game Engine
 # ─────────────────────────────────────────────────────────────────────────────
 class TargetRushGame:
+    """set_led(..., r, g, b) is logical RGB; frames use GRB (build_frame_data)."""
+
     def __init__(self, service: LightService, on_event):
         self._svc    = service
         self._notify = on_event
@@ -395,6 +409,7 @@ class TargetRushApp(tk.Tk):
         if ip:
             self._service.set_device(ip, self._cfg.get("udp_port", 4626))
         self._service.set_recv_port(self._cfg.get("receiver_port", 7800))
+        self._service.set_bind_ip(receiver_bind_ip_from_config(self._cfg))
         self._service.set_poll_rate(self._cfg.get("polling_rate_ms", 100))
         self._service.start_receiver()
         self._service.start_polling()
